@@ -1,7 +1,7 @@
 # SD1.5 Distillation, Pruning & Quantization Pipeline
 
 Pipeline for creating a fast, low-VRAM Stable Diffusion 1.5 model through:
-1. **Knowledge Distillation** - Train student to match teacher's denoising in fewer steps
+1. **Knowledge Distillation** - Train student to match teacher's noise predictions, enabling fewer inference steps
 2. **Magnitude Pruning** - Zero out small weights to reduce effective parameters
 3. **FP16 Quantization** - Reduce precision for 2x memory savings
 
