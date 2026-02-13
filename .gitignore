@@ -1,0 +1,24 @@
+# Virtual environment
+venv/
+.venv/
+
+# Output directories
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hugging Face cache
+.cache/
