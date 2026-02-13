@@ -2,7 +2,7 @@
 
 Pipeline for creating a fast, low-VRAM Stable Diffusion 1.5 model through:
 1. **Knowledge Distillation** - Train student to match teacher's noise predictions, enabling fewer inference steps
-2. **Magnitude Pruning** - Zero out small weights to reduce effective parameters
+2. **Structured Pruning** - Remove entire channels based on L1 importance, actually reducing model size
 3. **FP16 Quantization** - Reduce precision for 2x memory savings
 
 ## Quick Start
@@ -36,7 +36,7 @@ Edit `run.sh` to adjust:
 | `BASE` | `runwayml/stable-diffusion-v1-5` | Base model to distill |
 | `STEPS` | `800` | Distillation training steps |
 | `LR` | `1e-5` | Learning rate |
-| `PRUNE_RATIO` | `0.3` | Fraction of weights to prune |
+| `PRUNE_RATIO` | `0.3` | Fraction of channels to remove per layer |
 
 ## How It Works
 
@@ -53,12 +53,14 @@ The original script tried to backpropagate through `pipe()` calls, which doesn't
 4. Minimize MSE between predictions
 5. Student learns to denoise like teacher
 
-### Pruning
+### Structured Pruning
 
-Magnitude-based unstructured pruning:
-- For each weight tensor, find the `PRUNE_RATIO` quantile threshold
-- Zero out weights below threshold
-- Reduces effective parameters but not model size (for actual size reduction, you'd need structured pruning + architecture changes)
+Channel-wise structured pruning that **actually reduces model size**:
+- Computes L1 importance score for each output channel (sum of absolute weights)
+- Removes the least important `PRUNE_RATIO` fraction of channels entirely
+- Adjusts layer dimensions accordingly (smaller weight tensors)
+- Skips critical layers (projections, shortcuts, small layers)
+- Results in smaller file size and faster inference, not just sparse weights
 
 ### Quantization
 
@@ -92,5 +94,5 @@ The server uses:
 ## Limitations
 
 1. **Distillation quality**: 800 steps is minimal; production would need 10k-100k steps
-2. **Unstructured pruning**: Doesn't reduce model file size; need structured pruning for that
+2. **Structured pruning**: Aggressive pruning (>30%) may degrade quality; fine-tuning after pruning is recommended for production
 3. **Few-step inference**: True few-step models (like LCM, SDXL-Turbo) use specialized training

@@ -167,14 +167,16 @@ print("Distillation complete!")
 PY
 
 ########################################
-# PRUNE UNET (Magnitude-based structured pruning)
+# PRUNE UNET (Structured Channel Pruning)
 ########################################
 
-echo "=== PRUNE ==="
+echo "=== STRUCTURED PRUNE ==="
 
 python3 << 'PY'
 import torch
+import torch.nn as nn
 import os
+import copy
 from diffusers import UNet2DConditionModel, StableDiffusionPipeline
 
 DISTILL = os.environ.get("DISTILL", "./output/distilled")
@@ -184,30 +186,181 @@ PRUNE_RATIO = float(os.environ.get("PRUNE_RATIO", 0.3))
 print(f"Loading distilled UNet from {DISTILL}...")
 unet = UNet2DConditionModel.from_pretrained(DISTILL, subfolder="unet")
 
-# Magnitude-based unstructured pruning
-# Note: True structured pruning requires architecture changes
-print(f"Applying magnitude pruning with ratio {PRUNE_RATIO}...")
+def get_conv_layers(model):
+    """Get all Conv2d layers that can be pruned."""
+    conv_layers = []
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            # Skip 1x1 convs that change dimensions critically (in/out projections)
+            # and skip depthwise convs (groups == in_channels)
+            if module.groups == 1 and module.out_channels > 32:
+                conv_layers.append((name, module))
+    return conv_layers
 
-total_params = 0
-pruned_params = 0
+def compute_channel_importance(conv_layer):
+    """Compute importance score for each output channel using L1 norm."""
+    weight = conv_layer.weight.data  # [out_channels, in_channels, H, W]
+    # L1 norm across input channels and spatial dimensions
+    importance = torch.sum(torch.abs(weight), dim=(1, 2, 3))
+    return importance
 
-for name, param in unet.named_parameters():
-    if param.ndim >= 2:  # Only prune weight matrices, not biases
-        total_params += param.numel()
-        
-        # Calculate threshold for this layer
-        abs_weights = torch.abs(param.data)
-        threshold = torch.quantile(abs_weights.flatten(), PRUNE_RATIO)
-        
-        # Create mask and zero out small weights
-        mask = abs_weights < threshold
-        param.data[mask] = 0
-        pruned_params += mask.sum().item()
+def prune_conv_layer(conv, keep_indices):
+    """Create a new smaller Conv2d with only the kept output channels."""
+    new_out_channels = len(keep_indices)
+    
+    new_conv = nn.Conv2d(
+        in_channels=conv.in_channels,
+        out_channels=new_out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        dilation=conv.dilation,
+        groups=conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode
+    )
+    
+    # Copy weights for kept channels
+    new_conv.weight.data = conv.weight.data[keep_indices].clone()
+    if conv.bias is not None:
+        new_conv.bias.data = conv.bias.data[keep_indices].clone()
+    
+    return new_conv
 
-print(f"Total parameters: {total_params:,}")
-print(f"Pruned parameters: {pruned_params:,} ({100*pruned_params/total_params:.1f}%)")
+def prune_following_layer(next_layer, keep_indices):
+    """Prune input channels of the following layer to match."""
+    if isinstance(next_layer, nn.Conv2d):
+        new_conv = nn.Conv2d(
+            in_channels=len(keep_indices),
+            out_channels=next_layer.out_channels,
+            kernel_size=next_layer.kernel_size,
+            stride=next_layer.stride,
+            padding=next_layer.padding,
+            dilation=next_layer.dilation,
+            groups=next_layer.groups,
+            bias=next_layer.bias is not None,
+            padding_mode=next_layer.padding_mode
+        )
+        new_conv.weight.data = next_layer.weight.data[:, keep_indices].clone()
+        if next_layer.bias is not None:
+            new_conv.bias.data = next_layer.bias.data.clone()
+        return new_conv
+    elif isinstance(next_layer, nn.GroupNorm):
+        # GroupNorm: adjust num_channels
+        new_gn = nn.GroupNorm(
+            num_groups=min(next_layer.num_groups, len(keep_indices)),
+            num_channels=len(keep_indices),
+            eps=next_layer.eps,
+            affine=next_layer.affine
+        )
+        if next_layer.affine:
+            new_gn.weight.data = next_layer.weight.data[keep_indices].clone()
+            new_gn.bias.data = next_layer.bias.data[keep_indices].clone()
+        return new_gn
+    elif isinstance(next_layer, nn.BatchNorm2d):
+        new_bn = nn.BatchNorm2d(
+            num_features=len(keep_indices),
+            eps=next_layer.eps,
+            momentum=next_layer.momentum,
+            affine=next_layer.affine,
+            track_running_stats=next_layer.track_running_stats
+        )
+        if next_layer.affine:
+            new_bn.weight.data = next_layer.weight.data[keep_indices].clone()
+            new_bn.bias.data = next_layer.bias.data[keep_indices].clone()
+        if next_layer.track_running_stats:
+            new_bn.running_mean.data = next_layer.running_mean.data[keep_indices].clone()
+            new_bn.running_var.data = next_layer.running_var.data[keep_indices].clone()
+        return new_bn
+    return next_layer
+
+def structured_prune_unet(unet, prune_ratio):
+    """
+    Apply structured pruning to UNet Conv2d layers.
+    This removes entire output channels based on L1 importance.
+    """
+    total_channels_before = 0
+    total_channels_after = 0
+    pruned_layers = 0
+    
+    # Get all modules as a dict for easier access
+    modules_dict = dict(unet.named_modules())
+    
+    # Find conv layers in ResNet blocks that are safe to prune
+    # Focus on conv layers within the same block where we can trace dependencies
+    for name, module in list(unet.named_modules()):
+        if isinstance(module, nn.Conv2d) and module.groups == 1:
+            # Skip critical projection layers and small layers
+            if any(skip in name for skip in ['proj_in', 'proj_out', 'conv_shortcut', 'time_emb', 'conv_in', 'conv_out']):
+                continue
+            if module.out_channels <= 64:  # Don't prune small layers
+                continue
+                
+            out_channels = module.out_channels
+            total_channels_before += out_channels
+            
+            # Compute importance and determine channels to keep
+            importance = compute_channel_importance(module)
+            num_keep = max(int(out_channels * (1 - prune_ratio)), 32)  # Keep at least 32
+            num_keep = min(num_keep, out_channels)  # Don't keep more than we have
+            
+            # Get indices of most important channels
+            _, keep_indices = torch.topk(importance, num_keep)
+            keep_indices = keep_indices.sort()[0]  # Sort for consistency
+            
+            total_channels_after += num_keep
+            
+            if num_keep < out_channels:
+                # Prune this layer's output channels
+                new_weight = module.weight.data[keep_indices].clone()
+                
+                # Create new smaller conv
+                new_conv = nn.Conv2d(
+                    module.in_channels, num_keep, module.kernel_size,
+                    module.stride, module.padding, module.dilation,
+                    module.groups, module.bias is not None, module.padding_mode
+                )
+                new_conv.weight.data = new_weight
+                if module.bias is not None:
+                    new_conv.bias.data = module.bias.data[keep_indices].clone()
+                
+                # Replace in parent module
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                if parent_name:
+                    parent = modules_dict[parent_name]
+                    setattr(parent, child_name, new_conv)
+                
+                pruned_layers += 1
+                print(f"  Pruned {name}: {out_channels} -> {num_keep} channels")
+    
+    reduction = (1 - total_channels_after / total_channels_before) * 100 if total_channels_before > 0 else 0
+    print(f"\nStructured pruning summary:")
+    print(f"  Layers pruned: {pruned_layers}")
+    print(f"  Total channels: {total_channels_before:,} -> {total_channels_after:,}")
+    print(f"  Channel reduction: {reduction:.1f}%")
+    
+    return unet
+
+print(f"Applying structured pruning with ratio {PRUNE_RATIO}...")
+print("(Removing entire channels based on L1 importance)\n")
+
+# Count parameters before
+params_before = sum(p.numel() for p in unet.parameters())
+
+# Apply structured pruning
+unet = structured_prune_unet(unet, PRUNE_RATIO)
+
+# Count parameters after
+params_after = sum(p.numel() for p in unet.parameters())
+
+print(f"\nParameter reduction:")
+print(f"  Before: {params_before:,}")
+print(f"  After:  {params_after:,}")
+print(f"  Reduction: {(1 - params_after/params_before)*100:.1f}%")
 
 # Save pruned UNet
+os.makedirs(f"{PRUNE_OUT}/unet", exist_ok=True)
 unet.save_pretrained(f"{PRUNE_OUT}/unet")
 
 # Copy full pipeline with pruned unet
@@ -215,7 +368,7 @@ pipe = StableDiffusionPipeline.from_pretrained(DISTILL)
 pipe.unet = unet
 pipe.save_pretrained(PRUNE_OUT)
 
-print(f"Pruned model saved to {PRUNE_OUT}")
+print(f"\nStructured pruned model saved to {PRUNE_OUT}")
 PY
 
 ########################################
