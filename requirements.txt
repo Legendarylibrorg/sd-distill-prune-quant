@@ -7,3 +7,12 @@ safetensors>=0.4.0
 pillow>=10.0.0
 tqdm>=4.66.0
 gradio>=4.0.0
+scipy>=1.11.0
+
+# Optional: ONNX export
+optimum>=1.14.0
+onnx>=1.15.0
+onnxruntime>=1.16.0
+
+# Optional: Memory efficient attention
+# xformers>=0.0.23  # Uncomment if compatible with your CUDA version
