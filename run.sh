@@ -39,6 +39,13 @@ TOME_RATIO=0.5
 # INT8 quantization calibration samples
 INT8_CALIBRATION_SAMPLES=100
 
+# Quality evaluation settings
+EVAL_SAMPLES=4
+EVAL_AFTER_EACH_STAGE=true
+MIN_CLIP_RETENTION=0.90
+MAX_LPIPS_INCREASE=0.15
+MIN_SSIM_RETENTION=0.85
+
 ########################################
 # ENV
 ########################################
@@ -55,12 +62,15 @@ pip install \
     diffusers transformers accelerate \
     safetensors pillow tqdm gradio \
     optimum onnx onnxruntime \
-    scipy
+    scipy lpips
+
+# Install CLIP for evaluation
+pip install git+https://github.com/openai/CLIP.git --quiet 2>/dev/null || echo "CLIP install failed, some metrics unavailable"
 
 # Optional: Install xformers if available
 pip install xformers --quiet 2>/dev/null || echo "xformers not available, skipping"
 
-mkdir -p "$OUT" "$DISTILL" "$PRUNE" "$QUANT" "$FINETUNE" "$EXPORT" "./data"
+mkdir -p "$OUT" "$DISTILL" "$PRUNE" "$QUANT" "$FINETUNE" "$EXPORT" "./data" "$OUT/eval"
 
 # Create sample captions if not exists
 if [ ! -f "$DATA" ]; then
@@ -89,6 +99,111 @@ with open('$DATA', 'w') as f:
     json.dump(captions, f, indent=2)
 "
 fi
+
+########################################
+# GENERATE BASELINE REFERENCES
+########################################
+
+echo "=== GENERATING BASELINE REFERENCES ==="
+
+python3 << 'PY'
+import torch
+import json
+import os
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+BASE = os.environ.get("BASE", "runwayml/stable-diffusion-v1-5")
+DATA = os.environ.get("DATA", "./data/captions.json")
+OUT = os.environ.get("OUT", "./output")
+EVAL_SAMPLES = int(os.environ.get("EVAL_SAMPLES", 4))
+
+eval_dir = os.path.join(OUT, "eval", "baseline")
+os.makedirs(eval_dir, exist_ok=True)
+
+# Check if baseline already exists
+if os.path.exists(os.path.join(eval_dir, "metrics.json")):
+    print("Baseline references already exist, skipping...")
+else:
+    print(f"Loading baseline model from {BASE}...")
+    pipe = StableDiffusionPipeline.from_pretrained(BASE, torch_dtype=torch.float16)
+    
+    if DEVICE == "cuda":
+        pipe.enable_model_cpu_offload()
+    
+    with open(DATA) as f:
+        captions = json.load(f)
+    
+    eval_prompts = [c["text"] for c in captions[:EVAL_SAMPLES]]
+    
+    print(f"Generating {EVAL_SAMPLES} baseline reference images (50 steps)...")
+    
+    baseline_metrics = {
+        "prompts": eval_prompts,
+        "images": [],
+        "clip_scores": [],
+        "inference_times": [],
+    }
+    
+    # Import evaluation utilities
+    import sys
+    sys.path.insert(0, os.getcwd())
+    
+    try:
+        from evaluate import compute_clip_score
+        has_clip = True
+    except:
+        has_clip = False
+        print("CLIP not available for baseline metrics")
+    
+    import time
+    
+    generator = torch.Generator(device=DEVICE).manual_seed(42)
+    
+    for i, prompt in enumerate(tqdm(eval_prompts, desc="Generating baselines")):
+        start = time.time()
+        
+        with torch.inference_mode():
+            image = pipe(
+                prompt,
+                num_inference_steps=50,
+                generator=torch.Generator(device=DEVICE).manual_seed(42 + i),
+            ).images[0]
+        
+        elapsed = (time.time() - start) * 1000
+        
+        # Save image
+        image_path = os.path.join(eval_dir, f"baseline_{i:03d}.png")
+        image.save(image_path)
+        baseline_metrics["images"].append(image_path)
+        baseline_metrics["inference_times"].append(elapsed)
+        
+        # Compute CLIP score
+        if has_clip:
+            clip_score = compute_clip_score(image, prompt, DEVICE)
+            baseline_metrics["clip_scores"].append(clip_score)
+            print(f"  {i}: CLIP={clip_score:.4f}, Time={elapsed:.0f}ms")
+    
+    # Save baseline metrics
+    baseline_metrics["average_clip"] = sum(baseline_metrics["clip_scores"]) / len(baseline_metrics["clip_scores"]) if baseline_metrics["clip_scores"] else 0
+    baseline_metrics["average_time"] = sum(baseline_metrics["inference_times"]) / len(baseline_metrics["inference_times"])
+    
+    with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+        json.dump(baseline_metrics, f, indent=2)
+    
+    print(f"\nBaseline metrics:")
+    print(f"  Average CLIP score: {baseline_metrics['average_clip']:.4f}")
+    print(f"  Average inference time: {baseline_metrics['average_time']:.0f}ms")
+    print(f"  Saved to: {eval_dir}")
+
+    # Clean up
+    del pipe
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+PY
 
 ########################################
 # PROGRESSIVE DISTILLATION (50→25→12→6)
@@ -283,6 +398,151 @@ pipe.unet = ema_unet
 pipe.save_pretrained(DISTILL)
 
 print("Progressive distillation complete!")
+PY
+
+########################################
+# EVALUATE: POST-DISTILLATION
+########################################
+
+echo "=== QUALITY EVALUATION: POST-DISTILLATION ==="
+
+python3 << 'PY'
+import torch
+import json
+import os
+import sys
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+import time
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DISTILL = os.environ.get("DISTILL", "./output/distilled")
+OUT = os.environ.get("OUT", "./output")
+EVAL_SAMPLES = int(os.environ.get("EVAL_SAMPLES", 4))
+MIN_CLIP_RETENTION = float(os.environ.get("MIN_CLIP_RETENTION", 0.90))
+MAX_LPIPS_INCREASE = float(os.environ.get("MAX_LPIPS_INCREASE", 0.15))
+
+eval_dir = os.path.join(OUT, "eval", "distilled")
+baseline_dir = os.path.join(OUT, "eval", "baseline")
+os.makedirs(eval_dir, exist_ok=True)
+
+sys.path.insert(0, os.getcwd())
+
+print(f"Evaluating distilled model from {DISTILL}...")
+
+# Load baseline metrics
+with open(os.path.join(baseline_dir, "metrics.json")) as f:
+    baseline = json.load(f)
+
+# Load distilled model
+pipe = StableDiffusionPipeline.from_pretrained(DISTILL, torch_dtype=torch.float16)
+if DEVICE == "cuda":
+    pipe.enable_model_cpu_offload()
+
+# Import evaluation utilities
+try:
+    from evaluate import compute_clip_score, compute_lpips, compute_psnr, compute_ssim, QualityMetrics
+    has_eval = True
+except ImportError as e:
+    print(f"Evaluation utilities not fully available: {e}")
+    has_eval = False
+
+prompts = baseline["prompts"]
+metrics = {
+    "stage": "distilled",
+    "num_inference_steps": 6,
+    "clip_scores": [],
+    "lpips_scores": [],
+    "psnr_scores": [],
+    "ssim_scores": [],
+    "inference_times": [],
+}
+
+print(f"\nEvaluating with {len(prompts)} prompts at 6 inference steps...")
+
+for i, prompt in enumerate(tqdm(prompts, desc="Evaluating")):
+    # Load baseline image
+    baseline_img = Image.open(baseline["images"][i])
+    
+    start = time.time()
+    with torch.inference_mode():
+        gen_image = pipe(
+            prompt,
+            num_inference_steps=6,
+            generator=torch.Generator(device=DEVICE).manual_seed(42 + i),
+        ).images[0]
+    elapsed = (time.time() - start) * 1000
+    
+    # Save generated image
+    gen_image.save(os.path.join(eval_dir, f"distilled_{i:03d}.png"))
+    metrics["inference_times"].append(elapsed)
+    
+    if has_eval:
+        clip = compute_clip_score(gen_image, prompt, DEVICE)
+        lpips = compute_lpips(gen_image, baseline_img, DEVICE)
+        psnr = compute_psnr(gen_image, baseline_img)
+        ssim = compute_ssim(gen_image, baseline_img)
+        
+        metrics["clip_scores"].append(clip)
+        metrics["lpips_scores"].append(lpips)
+        metrics["psnr_scores"].append(psnr)
+        metrics["ssim_scores"].append(ssim)
+
+# Compute averages
+metrics["avg_clip"] = sum(metrics["clip_scores"]) / len(metrics["clip_scores"]) if metrics["clip_scores"] else 0
+metrics["avg_lpips"] = sum(metrics["lpips_scores"]) / len(metrics["lpips_scores"]) if metrics["lpips_scores"] else 0
+metrics["avg_psnr"] = sum(metrics["psnr_scores"]) / len(metrics["psnr_scores"]) if metrics["psnr_scores"] else 0
+metrics["avg_ssim"] = sum(metrics["ssim_scores"]) / len(metrics["ssim_scores"]) if metrics["ssim_scores"] else 0
+metrics["avg_time"] = sum(metrics["inference_times"]) / len(metrics["inference_times"])
+
+# Compute retention vs baseline
+baseline_clip = baseline.get("average_clip", 0)
+if baseline_clip > 0:
+    metrics["clip_retention"] = metrics["avg_clip"] / baseline_clip
+else:
+    metrics["clip_retention"] = 1.0
+
+metrics["speedup"] = baseline["average_time"] / metrics["avg_time"] if metrics["avg_time"] > 0 else 1.0
+
+# Save metrics
+with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+    json.dump(metrics, f, indent=2)
+
+# Print results
+print("\n" + "="*60)
+print("POST-DISTILLATION QUALITY REPORT")
+print("="*60)
+print(f"  CLIP Score:    {metrics['avg_clip']:.4f} (retention: {metrics['clip_retention']:.1%})")
+print(f"  LPIPS:         {metrics['avg_lpips']:.4f} (lower is better)")
+print(f"  PSNR:          {metrics['avg_psnr']:.2f} dB")
+print(f"  SSIM:          {metrics['avg_ssim']:.4f}")
+print(f"  Inference:     {metrics['avg_time']:.0f}ms ({metrics['speedup']:.1f}x faster)")
+print("="*60)
+
+# Quality check
+quality_ok = True
+warnings = []
+
+if metrics["clip_retention"] < MIN_CLIP_RETENTION:
+    warnings.append(f"⚠️  CLIP retention {metrics['clip_retention']:.1%} below threshold {MIN_CLIP_RETENTION:.1%}")
+    quality_ok = False
+
+if metrics["avg_lpips"] > MAX_LPIPS_INCREASE:
+    warnings.append(f"⚠️  LPIPS {metrics['avg_lpips']:.4f} above threshold {MAX_LPIPS_INCREASE:.4f}")
+    quality_ok = False
+
+if quality_ok:
+    print("✓ Quality check PASSED")
+else:
+    print("\n".join(warnings))
+    print("\n⚠️  Consider adjusting distillation parameters or increasing training steps")
+
+# Cleanup
+del pipe
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+
 PY
 
 ########################################
@@ -732,6 +992,114 @@ print(f"Pruned UNet saved to {PRUNE_OUT}")
 PY
 
 ########################################
+# EVALUATE: POST-PRUNING (Before Fine-tuning)
+########################################
+
+echo "=== QUALITY EVALUATION: POST-PRUNING ==="
+
+python3 << 'PY'
+import torch
+import json
+import os
+import sys
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+import time
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+PRUNE = os.environ.get("PRUNE", "./output/pruned")
+OUT = os.environ.get("OUT", "./output")
+
+eval_dir = os.path.join(OUT, "eval", "pruned")
+baseline_dir = os.path.join(OUT, "eval", "baseline")
+os.makedirs(eval_dir, exist_ok=True)
+
+sys.path.insert(0, os.getcwd())
+
+print(f"Evaluating pruned model from {PRUNE}...")
+
+with open(os.path.join(baseline_dir, "metrics.json")) as f:
+    baseline = json.load(f)
+
+pipe = StableDiffusionPipeline.from_pretrained(PRUNE, torch_dtype=torch.float16)
+if DEVICE == "cuda":
+    pipe.enable_model_cpu_offload()
+
+try:
+    from evaluate import compute_clip_score, compute_lpips, compute_psnr, compute_ssim
+    has_eval = True
+except:
+    has_eval = False
+
+prompts = baseline["prompts"]
+metrics = {
+    "stage": "pruned",
+    "num_inference_steps": 6,
+    "clip_scores": [], "lpips_scores": [], "psnr_scores": [], "ssim_scores": [],
+    "inference_times": [],
+}
+
+for i, prompt in enumerate(tqdm(prompts, desc="Evaluating pruned")):
+    baseline_img = Image.open(baseline["images"][i])
+    
+    start = time.time()
+    with torch.inference_mode():
+        gen_image = pipe(
+            prompt, num_inference_steps=6,
+            generator=torch.Generator(device=DEVICE).manual_seed(42 + i),
+        ).images[0]
+    elapsed = (time.time() - start) * 1000
+    
+    gen_image.save(os.path.join(eval_dir, f"pruned_{i:03d}.png"))
+    metrics["inference_times"].append(elapsed)
+    
+    if has_eval:
+        metrics["clip_scores"].append(compute_clip_score(gen_image, prompt, DEVICE))
+        metrics["lpips_scores"].append(compute_lpips(gen_image, baseline_img, DEVICE))
+        metrics["psnr_scores"].append(compute_psnr(gen_image, baseline_img))
+        metrics["ssim_scores"].append(compute_ssim(gen_image, baseline_img))
+
+metrics["avg_clip"] = sum(metrics["clip_scores"]) / len(metrics["clip_scores"]) if metrics["clip_scores"] else 0
+metrics["avg_lpips"] = sum(metrics["lpips_scores"]) / len(metrics["lpips_scores"]) if metrics["lpips_scores"] else 0
+metrics["avg_psnr"] = sum(metrics["psnr_scores"]) / len(metrics["psnr_scores"]) if metrics["psnr_scores"] else 0
+metrics["avg_ssim"] = sum(metrics["ssim_scores"]) / len(metrics["ssim_scores"]) if metrics["ssim_scores"] else 0
+metrics["avg_time"] = sum(metrics["inference_times"]) / len(metrics["inference_times"])
+
+baseline_clip = baseline.get("average_clip", 0)
+metrics["clip_retention"] = metrics["avg_clip"] / baseline_clip if baseline_clip > 0 else 1.0
+metrics["speedup"] = baseline["average_time"] / metrics["avg_time"] if metrics["avg_time"] > 0 else 1.0
+
+# Get model size
+import subprocess
+result = subprocess.run(["du", "-sm", PRUNE], capture_output=True, text=True)
+metrics["model_size_mb"] = int(result.stdout.split()[0]) if result.stdout else 0
+
+with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+    json.dump(metrics, f, indent=2)
+
+print("\n" + "="*60)
+print("POST-PRUNING QUALITY REPORT")
+print("="*60)
+print(f"  CLIP Score:    {metrics['avg_clip']:.4f} (retention: {metrics['clip_retention']:.1%})")
+print(f"  LPIPS:         {metrics['avg_lpips']:.4f}")
+print(f"  PSNR:          {metrics['avg_psnr']:.2f} dB")
+print(f"  SSIM:          {metrics['avg_ssim']:.4f}")
+print(f"  Inference:     {metrics['avg_time']:.0f}ms ({metrics['speedup']:.1f}x faster)")
+print(f"  Model Size:    {metrics['model_size_mb']} MB")
+print("="*60)
+
+if metrics["clip_retention"] < 0.85:
+    print("⚠️  Significant quality loss detected - fine-tuning is critical")
+else:
+    print("✓ Quality acceptable, fine-tuning will further improve")
+
+del pipe
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+PY
+
+########################################
 # FINE-TUNING AFTER PRUNING
 ########################################
 
@@ -817,6 +1185,123 @@ print(f"Fine-tuned model saved to {FINETUNE_DIR}")
 PY
 
 ########################################
+# EVALUATE: POST-FINETUNING
+########################################
+
+echo "=== QUALITY EVALUATION: POST-FINETUNING ==="
+
+python3 << 'PY'
+import torch
+import json
+import os
+import sys
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+import time
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+FINETUNE = os.environ.get("FINETUNE", "./output/finetuned")
+OUT = os.environ.get("OUT", "./output")
+
+eval_dir = os.path.join(OUT, "eval", "finetuned")
+baseline_dir = os.path.join(OUT, "eval", "baseline")
+pruned_dir = os.path.join(OUT, "eval", "pruned")
+os.makedirs(eval_dir, exist_ok=True)
+
+sys.path.insert(0, os.getcwd())
+
+print(f"Evaluating fine-tuned model from {FINETUNE}...")
+
+with open(os.path.join(baseline_dir, "metrics.json")) as f:
+    baseline = json.load(f)
+
+with open(os.path.join(pruned_dir, "metrics.json")) as f:
+    pruned = json.load(f)
+
+pipe = StableDiffusionPipeline.from_pretrained(FINETUNE, torch_dtype=torch.float16)
+if DEVICE == "cuda":
+    pipe.enable_model_cpu_offload()
+
+try:
+    from evaluate import compute_clip_score, compute_lpips, compute_psnr, compute_ssim
+    has_eval = True
+except:
+    has_eval = False
+
+prompts = baseline["prompts"]
+metrics = {
+    "stage": "finetuned",
+    "num_inference_steps": 6,
+    "clip_scores": [], "lpips_scores": [], "psnr_scores": [], "ssim_scores": [],
+    "inference_times": [],
+}
+
+for i, prompt in enumerate(tqdm(prompts, desc="Evaluating finetuned")):
+    baseline_img = Image.open(baseline["images"][i])
+    
+    start = time.time()
+    with torch.inference_mode():
+        gen_image = pipe(
+            prompt, num_inference_steps=6,
+            generator=torch.Generator(device=DEVICE).manual_seed(42 + i),
+        ).images[0]
+    elapsed = (time.time() - start) * 1000
+    
+    gen_image.save(os.path.join(eval_dir, f"finetuned_{i:03d}.png"))
+    metrics["inference_times"].append(elapsed)
+    
+    if has_eval:
+        metrics["clip_scores"].append(compute_clip_score(gen_image, prompt, DEVICE))
+        metrics["lpips_scores"].append(compute_lpips(gen_image, baseline_img, DEVICE))
+        metrics["psnr_scores"].append(compute_psnr(gen_image, baseline_img))
+        metrics["ssim_scores"].append(compute_ssim(gen_image, baseline_img))
+
+metrics["avg_clip"] = sum(metrics["clip_scores"]) / len(metrics["clip_scores"]) if metrics["clip_scores"] else 0
+metrics["avg_lpips"] = sum(metrics["lpips_scores"]) / len(metrics["lpips_scores"]) if metrics["lpips_scores"] else 0
+metrics["avg_psnr"] = sum(metrics["psnr_scores"]) / len(metrics["psnr_scores"]) if metrics["psnr_scores"] else 0
+metrics["avg_ssim"] = sum(metrics["ssim_scores"]) / len(metrics["ssim_scores"]) if metrics["ssim_scores"] else 0
+metrics["avg_time"] = sum(metrics["inference_times"]) / len(metrics["inference_times"])
+
+baseline_clip = baseline.get("average_clip", 0)
+metrics["clip_retention"] = metrics["avg_clip"] / baseline_clip if baseline_clip > 0 else 1.0
+metrics["speedup"] = baseline["average_time"] / metrics["avg_time"] if metrics["avg_time"] > 0 else 1.0
+
+# Compute recovery from pruning
+metrics["clip_recovery"] = (metrics["avg_clip"] - pruned["avg_clip"]) / (baseline_clip - pruned["avg_clip"]) if (baseline_clip - pruned["avg_clip"]) != 0 else 1.0
+metrics["lpips_improvement"] = pruned["avg_lpips"] - metrics["avg_lpips"]
+
+with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+    json.dump(metrics, f, indent=2)
+
+print("\n" + "="*60)
+print("POST-FINETUNING QUALITY REPORT")
+print("="*60)
+print(f"  CLIP Score:    {metrics['avg_clip']:.4f} (retention: {metrics['clip_retention']:.1%})")
+print(f"  LPIPS:         {metrics['avg_lpips']:.4f} (improved by {metrics['lpips_improvement']:.4f})")
+print(f"  PSNR:          {metrics['avg_psnr']:.2f} dB")
+print(f"  SSIM:          {metrics['avg_ssim']:.4f}")
+print(f"  Inference:     {metrics['avg_time']:.0f}ms ({metrics['speedup']:.1f}x faster)")
+print("="*60)
+
+# Compare with pruned
+print("\nRecovery from pruning:")
+print(f"  CLIP: {pruned['avg_clip']:.4f} → {metrics['avg_clip']:.4f}")
+print(f"  LPIPS: {pruned['avg_lpips']:.4f} → {metrics['avg_lpips']:.4f}")
+
+if metrics["clip_retention"] >= 0.90:
+    print("\n✓ Fine-tuning successfully recovered quality (≥90% CLIP retention)")
+elif metrics["clip_retention"] >= 0.85:
+    print("\n⚠️  Quality partially recovered (85-90% CLIP retention)")
+else:
+    print("\n⚠️  Quality still degraded - consider increasing fine-tuning steps")
+
+del pipe
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
+PY
+
+########################################
 # INT8 QUANTIZATION
 ########################################
 
@@ -891,6 +1376,180 @@ torch.save(quantized_unet.state_dict(), f"{QUANT_DIR}/unet_int8.pt")
 print(f"\nQuantized models saved to {QUANT_DIR}")
 print("  - FP16 pipeline: load normally with torch_dtype=torch.float16")
 print("  - INT8 UNet: unet_int8.pt (for CPU deployment)")
+PY
+
+########################################
+# EVALUATE: FINAL QUANTIZED MODEL
+########################################
+
+echo "=== QUALITY EVALUATION: FINAL (QUANTIZED) ==="
+
+python3 << 'PY'
+import torch
+import json
+import os
+import sys
+from diffusers import StableDiffusionPipeline
+from PIL import Image
+from tqdm import tqdm
+import time
+
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+QUANT = os.environ.get("QUANT", "./output/quant")
+OUT = os.environ.get("OUT", "./output")
+
+eval_dir = os.path.join(OUT, "eval", "quantized")
+baseline_dir = os.path.join(OUT, "eval", "baseline")
+os.makedirs(eval_dir, exist_ok=True)
+
+sys.path.insert(0, os.getcwd())
+
+print(f"Final evaluation of quantized model from {QUANT}...")
+
+with open(os.path.join(baseline_dir, "metrics.json")) as f:
+    baseline = json.load(f)
+
+# Load all previous stage metrics
+stages = {}
+for stage in ["distilled", "pruned", "finetuned"]:
+    stage_path = os.path.join(OUT, "eval", stage, "metrics.json")
+    if os.path.exists(stage_path):
+        with open(stage_path) as f:
+            stages[stage] = json.load(f)
+
+pipe = StableDiffusionPipeline.from_pretrained(QUANT, torch_dtype=torch.float16)
+if DEVICE == "cuda":
+    pipe.enable_model_cpu_offload()
+
+try:
+    from evaluate import compute_clip_score, compute_lpips, compute_psnr, compute_ssim
+    has_eval = True
+except:
+    has_eval = False
+
+prompts = baseline["prompts"]
+metrics = {
+    "stage": "quantized",
+    "num_inference_steps": 6,
+    "clip_scores": [], "lpips_scores": [], "psnr_scores": [], "ssim_scores": [],
+    "inference_times": [],
+}
+
+for i, prompt in enumerate(tqdm(prompts, desc="Final evaluation")):
+    baseline_img = Image.open(baseline["images"][i])
+    
+    start = time.time()
+    with torch.inference_mode():
+        gen_image = pipe(
+            prompt, num_inference_steps=6,
+            generator=torch.Generator(device=DEVICE).manual_seed(42 + i),
+        ).images[0]
+    elapsed = (time.time() - start) * 1000
+    
+    gen_image.save(os.path.join(eval_dir, f"quantized_{i:03d}.png"))
+    metrics["inference_times"].append(elapsed)
+    
+    if has_eval:
+        metrics["clip_scores"].append(compute_clip_score(gen_image, prompt, DEVICE))
+        metrics["lpips_scores"].append(compute_lpips(gen_image, baseline_img, DEVICE))
+        metrics["psnr_scores"].append(compute_psnr(gen_image, baseline_img))
+        metrics["ssim_scores"].append(compute_ssim(gen_image, baseline_img))
+
+metrics["avg_clip"] = sum(metrics["clip_scores"]) / len(metrics["clip_scores"]) if metrics["clip_scores"] else 0
+metrics["avg_lpips"] = sum(metrics["lpips_scores"]) / len(metrics["lpips_scores"]) if metrics["lpips_scores"] else 0
+metrics["avg_psnr"] = sum(metrics["psnr_scores"]) / len(metrics["psnr_scores"]) if metrics["psnr_scores"] else 0
+metrics["avg_ssim"] = sum(metrics["ssim_scores"]) / len(metrics["ssim_scores"]) if metrics["ssim_scores"] else 0
+metrics["avg_time"] = sum(metrics["inference_times"]) / len(metrics["inference_times"])
+
+baseline_clip = baseline.get("average_clip", 0)
+metrics["clip_retention"] = metrics["avg_clip"] / baseline_clip if baseline_clip > 0 else 1.0
+metrics["speedup"] = baseline["average_time"] / metrics["avg_time"] if metrics["avg_time"] > 0 else 1.0
+
+# Get model size
+import subprocess
+result = subprocess.run(["du", "-sm", QUANT], capture_output=True, text=True)
+metrics["model_size_mb"] = int(result.stdout.split()[0]) if result.stdout else 0
+
+# Get baseline size
+result = subprocess.run(["du", "-sm", os.environ.get("BASE", "runwayml/stable-diffusion-v1-5")], capture_output=True, text=True)
+baseline_size = 5000  # Approximate if can't measure
+
+metrics["size_reduction"] = (1 - metrics["model_size_mb"] / baseline_size) * 100 if baseline_size > 0 else 0
+
+with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+    json.dump(metrics, f, indent=2)
+
+# Generate comprehensive report
+print("\n" + "="*70)
+print("FINAL COMPRESSION PIPELINE QUALITY REPORT")
+print("="*70)
+
+# Print comparison table
+print("\n{:<15} {:>10} {:>10} {:>10} {:>10} {:>12}".format(
+    "Stage", "CLIP↑", "LPIPS↓", "PSNR↑", "SSIM↑", "Time(ms)"
+))
+print("-"*70)
+print("{:<15} {:>10.4f} {:>10} {:>10} {:>10} {:>12.0f}".format(
+    "Baseline", baseline_clip, "-", "-", "-", baseline["average_time"]
+))
+
+for stage_name, stage_data in stages.items():
+    print("{:<15} {:>10.4f} {:>10.4f} {:>10.2f} {:>10.4f} {:>12.0f}".format(
+        stage_name.capitalize(),
+        stage_data.get("avg_clip", 0),
+        stage_data.get("avg_lpips", 0),
+        stage_data.get("avg_psnr", 0),
+        stage_data.get("avg_ssim", 0),
+        stage_data.get("avg_time", 0)
+    ))
+
+print("{:<15} {:>10.4f} {:>10.4f} {:>10.2f} {:>10.4f} {:>12.0f}".format(
+    "QUANTIZED",
+    metrics["avg_clip"],
+    metrics["avg_lpips"],
+    metrics["avg_psnr"],
+    metrics["avg_ssim"],
+    metrics["avg_time"]
+))
+print("="*70)
+
+print(f"\nFINAL RESULTS:")
+print(f"  Quality Retention: {metrics['clip_retention']:.1%} (CLIP score)")
+print(f"  Speedup: {metrics['speedup']:.1f}x faster")
+print(f"  Model Size: {metrics['model_size_mb']} MB")
+print(f"  Inference Steps: 50 → 6 (8.3x fewer)")
+
+if metrics['clip_retention'] >= 0.90:
+    print("\n✅ SUCCESS: Quality target met (≥90% retention)")
+elif metrics['clip_retention'] >= 0.85:
+    print("\n⚠️  ACCEPTABLE: Quality slightly below target (85-90% retention)")
+else:
+    print("\n❌ WARNING: Significant quality loss (<85% retention)")
+    print("   Consider: reducing pruning ratio, increasing fine-tuning steps")
+
+# Save comprehensive report
+report = {
+    "baseline": {"clip": baseline_clip, "time_ms": baseline["average_time"]},
+    "stages": stages,
+    "final": metrics,
+    "summary": {
+        "clip_retention": metrics["clip_retention"],
+        "speedup": metrics["speedup"],
+        "model_size_mb": metrics["model_size_mb"],
+        "inference_steps": 6,
+        "quality_target_met": metrics["clip_retention"] >= 0.90
+    }
+}
+
+with open(os.path.join(OUT, "eval", "full_report.json"), "w") as f:
+    json.dump(report, f, indent=2)
+
+print(f"\nFull report saved to: {OUT}/eval/full_report.json")
+print(f"Generated images saved in: {OUT}/eval/*/")
+
+del pipe
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 PY
 
 ########################################

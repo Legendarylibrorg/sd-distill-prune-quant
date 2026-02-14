@@ -8,6 +8,11 @@ pillow>=10.0.0
 tqdm>=4.66.0
 gradio>=4.0.0
 scipy>=1.11.0
+numpy>=1.24.0
+
+# Quality evaluation
+lpips>=0.1.4
+# clip: pip install git+https://github.com/openai/CLIP.git
 
 # Optional: ONNX export
 optimum>=1.14.0

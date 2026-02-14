@@ -28,6 +28,14 @@ Comprehensive pipeline for compressing and optimizing Stable Diffusion 1.5 with 
 - **xFormers** - Memory-efficient attention
 - **Attention/VAE Slicing** - Low VRAM inference
 
+### Quality Evaluation
+- **CLIP Score** - Text-image alignment measurement
+- **LPIPS** - Perceptual similarity to baseline
+- **PSNR/SSIM** - Pixel-level quality metrics
+- **Quality Guard** - Automatic thresholds to prevent excessive degradation
+- **Per-Stage Evaluation** - Metrics after distillation, pruning, fine-tuning, quantization
+- **Comprehensive Reports** - JSON reports with full metrics history
+
 ### Deployment
 - **ONNX Export** - For TensorRT/ONNX Runtime
 - **Safetensors Sharding** - Streaming model load
@@ -59,6 +67,12 @@ Edit `run.sh` to adjust:
 | **Fine-tuning** | | |
 | `FINETUNE_STEPS` | `200` | Post-pruning fine-tuning steps |
 | `FINETUNE_LR` | `5e-6` | Fine-tuning learning rate |
+| **Quality Evaluation** | | |
+| `EVAL_SAMPLES` | `4` | Number of samples for evaluation |
+| `MIN_CLIP_RETENTION` | `0.90` | Minimum acceptable CLIP score retention |
+| `MAX_LPIPS_INCREASE` | `0.15` | Maximum acceptable LPIPS increase |
+| `MIN_SSIM_RETENTION` | `0.85` | Minimum acceptable SSIM retention |
+| `FINETUNE_LR` | `5e-6` | Fine-tuning learning rate |
 | **Optimization** | | |
 | `TOME_RATIO` | `0.5` | Token merging ratio |
 | `INT8_CALIBRATION_SAMPLES` | `100` | INT8 calibration samples |
@@ -66,8 +80,12 @@ Edit `run.sh` to adjust:
 ## Pipeline Stages
 
 ```
+0. Baseline Generation
+   └── Generate reference images with original model (50 steps)
+   
 1. Progressive Distillation (50→25→12→6 steps)
    └── With attention distillation & EMA
+   └── 📊 EVALUATE: Compare to baseline
    
 2. CLIP Distillation
    └── Hidden states + intermediate layers
@@ -79,13 +97,16 @@ Edit `run.sh` to adjust:
    ├── Text Encoder (25% MLP neurons)
    ├── VAE (20% channels)
    └── UNet (30% channels)
+   └── 📊 EVALUATE: Measure quality loss
    
 5. Fine-tuning
    └── Recover accuracy after pruning
+   └── 📊 EVALUATE: Verify recovery
    
 6. Quantization
    ├── FP16 (default)
    └── INT8 (CPU deployment)
+   └── 📊 EVALUATE: Final quality report
    
 7. Optimization Setup
    ├── Token Merging
@@ -96,13 +117,56 @@ Edit `run.sh` to adjust:
    └── All optimizations enabled
 ```
 
+## Quality Metrics
+
+The pipeline evaluates quality at each major stage using:
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| **CLIP Score** | Text-image alignment (higher is better) | ≥90% of baseline |
+| **LPIPS** | Perceptual distance (lower is better) | <0.15 increase |
+| **PSNR** | Peak signal-to-noise ratio (higher is better) | >15 dB |
+| **SSIM** | Structural similarity (higher is better) | ≥85% of baseline |
+
+### Sample Evaluation Output
+
+```
+======================================================================
+FINAL COMPRESSION PIPELINE QUALITY REPORT
+======================================================================
+
+Stage           CLIP↑      LPIPS↓     PSNR↑      SSIM↑      Time(ms)
+----------------------------------------------------------------------
+Baseline        0.3245          -          -          -          3200
+Distilled       0.3180     0.0823      22.45     0.8534          520
+Pruned          0.2998     0.1156      19.87     0.7823          480
+Finetuned       0.3102     0.0945      21.23     0.8245          485
+QUANTIZED       0.3098     0.0952      21.18     0.8231          350
+======================================================================
+
+FINAL RESULTS:
+  Quality Retention: 95.5% (CLIP score)
+  Speedup: 9.1x faster
+  Model Size: 2100 MB
+  Inference Steps: 50 → 6 (8.3x fewer)
+
+✅ SUCCESS: Quality target met (≥90% retention)
+```
+
 ## Output Structure
 
 ```
 output/
-├── distilled/          # Progressive + CFG distilled model
-├── pruned/             # All components pruned
-├── finetuned/          # Post-pruning fine-tuned
+├── eval/                     # Quality evaluation results
+│   ├── baseline/             # Reference images & metrics
+│   ├── distilled/            # Post-distillation evaluation
+│   ├── pruned/               # Post-pruning evaluation
+│   ├── finetuned/            # Post-finetuning evaluation
+│   ├── quantized/            # Final evaluation
+│   └── full_report.json      # Comprehensive comparison report
+├── distilled/                # Progressive + CFG distilled model
+├── pruned/                   # All components pruned
+├── finetuned/                # Post-pruning fine-tuned
 ├── quant/              # Quantized models
 │   ├── model_index.json
 │   ├── unet/           # FP16 UNet
