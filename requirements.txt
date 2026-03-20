@@ -16,7 +16,7 @@ lpips>=0.1.4
 
 # Optional: ONNX export
 optimum>=1.14.0
-onnx>=1.15.0
+onnx>=1.20.2
 onnxruntime>=1.16.0
 
 # Optional: Memory efficient attention
