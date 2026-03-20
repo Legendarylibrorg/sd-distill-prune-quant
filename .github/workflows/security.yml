@@ -1,0 +1,43 @@
+name: Security Checks
+
+on:
+  pull_request:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Security Tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install detect-secrets pip-audit
+
+      - name: Secret Scan
+        run: |
+          if [ -f .secrets.baseline ]; then
+            git ls-files -z | xargs -0 detect-secrets-hook --baseline .secrets.baseline
+          else
+            detect-secrets scan . > .secrets.baseline
+            git diff --exit-code .secrets.baseline
+          fi
+
+      - name: Dependency Vulnerability Audit
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit --no-deps --disable-pip -r requirements.txt
+          else
+            echo "No requirements.txt found; skipping pip-audit"
+          fi
