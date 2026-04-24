@@ -7,7 +7,7 @@ safetensors>=0.4.0
 pillow>=10.0.0
 tqdm>=4.66.0
 gradio>=4.0.0
-scipy>=1.11.0
+scipy>=1.17.1
 numpy>=1.24.0
 
 # Quality evaluation
