@@ -1,0 +1,99 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sd-compress"
+version = "0.2.0"
+description = "Distillation, structured pruning, fine-tuning, quantization and deployment helpers for Stable Diffusion 1.5"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "sd-distill-prune-quant contributors" }
+]
+keywords = [
+    "stable-diffusion",
+    "distillation",
+    "pruning",
+    "quantization",
+    "diffusers",
+    "model-compression",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Intended Audience :: Developers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
+    "diffusers>=0.38.0",
+    "transformers>=5.9.0",
+    "accelerate>=1.13.0",
+    "safetensors>=0.7.0",
+    "pillow>=12.2.0",
+    "numpy>=2.4.6",
+    "scipy>=1.17.1",
+    "tqdm>=4.67.3",
+    "gradio>=6.14.0",
+    "lpips>=0.1.4",
+]
+
+[project.optional-dependencies]
+onnx = [
+    "optimum>=2.1.0",
+    "onnx>=1.21.0",
+    "onnxruntime>=1.26.0",
+]
+dev = [
+    "ruff>=0.5.0",
+    "mypy>=1.8.0",
+    "build>=1.0.0",
+    "pytest>=7.4.0",
+    "pre-commit>=3.6.0",
+    "detect-secrets>=1.5.0",
+    "pip-audit>=2.7.0",
+]
+
+[project.scripts]
+sd-compress = "sd_compress.cli:main"
+
+[project.urls]
+Documentation = "https://github.com/Legendarylibrorg/sd-distill-prune-quant#readme"
+Source = "https://github.com/Legendarylibrorg/sd-distill-prune-quant"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["evaluate"]
+
+[tool.setuptools.packages.find]
+include = ["sd_compress*"]
+exclude = ["output*", "venv*", "data*", "tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = [
+    "E501", # line length handled by ruff format
+    "B008", # function call in argument defaults (used with dataclass field factories)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"evaluate.py" = ["B007", "E741"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+follow_imports = "silent"

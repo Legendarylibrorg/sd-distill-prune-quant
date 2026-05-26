@@ -37,7 +37,10 @@ jobs:
       - name: Dependency Vulnerability Audit
         run: |
           if [ -f requirements.txt ]; then
-            pip-audit --no-deps --disable-pip -r requirements.txt
+            # `--no-deps` requires == pins. We intentionally use semver ranges
+            # so contributors can stay on supported minimums; let pip-audit
+            # resolve transitively, which is more thorough anyway.
+            pip-audit -r requirements.txt --strict
           else
             echo "No requirements.txt found; skipping pip-audit"
           fi
