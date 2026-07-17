@@ -2,23 +2,23 @@
 # On Linux/Windows with an NVIDIA GPU, install the matching CUDA wheel first:
 #     pip install --index-url https://download.pytorch.org/whl/cu121 torch torchvision
 # On macOS (CPU/MPS) the default PyPI wheels are correct.
-torch>=2.12.0
-torchvision>=0.27.0
+torch>=2.13.0
+torchvision>=0.28.0
 
 # Diffusers stack
-diffusers>=0.38.0
-transformers>=5.9.0
-accelerate>=1.13.0
-safetensors>=0.7.0
+diffusers>=0.39.0
+transformers>=5.14.1
+accelerate>=1.14.0
+safetensors>=0.8.0
 
 # Image + data utilities
-pillow>=12.2.0
-numpy>=2.4.6
-scipy>=1.17.1
-tqdm>=4.67.3
+pillow>=12.3.0
+numpy>=2.5.1
+scipy>=1.18.0
+tqdm>=4.68.4
 
 # UI
-gradio>=6.14.0
+gradio>=6.20.0
 
 # Quality evaluation
 lpips>=0.1.4
@@ -26,9 +26,9 @@ lpips>=0.1.4
 #   pip install git+https://github.com/openai/CLIP.git
 
 # Optional ONNX export
-optimum>=2.1.0
-onnx>=1.21.0
-onnxruntime>=1.26.0
+optimum>=2.2.0
+onnx>=1.22.0
+onnxruntime>=1.27.0
 
 # Optional, only if your CUDA/torch combination supports it
 # xformers>=0.0.23
