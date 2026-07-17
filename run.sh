@@ -38,15 +38,30 @@ python -m pip install --upgrade pip >/dev/null
 ###############################################################################
 if [ ! -f "$VENV_DIR/.deps_installed" ]; then
     echo "[run.sh] Installing Python requirements (this may take a while)"
+
+    # Linux-first: install a CUDA-enabled torch before the rest of requirements
+    # so pip does not resolve a CPU-only wheel from PyPI.
+    if [ "$(uname -s)" = "Linux" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        CUDA_INDEX="${TORCH_CUDA_INDEX:-https://download.pytorch.org/whl/cu121}"
+        echo "[run.sh] Linux + NVIDIA detected — installing CUDA PyTorch from $CUDA_INDEX"
+        pip install --index-url "$CUDA_INDEX" torch torchvision \
+            || echo "[run.sh] WARNING: CUDA torch install failed; falling back to PyPI wheels"
+    fi
+
     pip install -r requirements.txt
 
     # CLIP for evaluation metrics is hosted on GitHub
     pip install --quiet "git+https://github.com/openai/CLIP.git" \
         || echo "[run.sh] WARNING: CLIP install failed; CLIP score will be skipped"
 
-    # xFormers is best-effort; failures are non-fatal
-    pip install --quiet xformers \
-        || echo "[run.sh] NOTE: xformers unavailable on this platform/CUDA combination"
+    # xFormers is best-effort; failures are non-fatal (biggest win on Linux CUDA)
+    if [ "$(uname -s)" = "Linux" ]; then
+        pip install --quiet xformers \
+            || echo "[run.sh] NOTE: xformers unavailable on this CUDA combination"
+    else
+        pip install --quiet xformers \
+            || echo "[run.sh] NOTE: xformers unavailable on this platform"
+    fi
 
     touch "$VENV_DIR/.deps_installed"
 fi

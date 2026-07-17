@@ -5,7 +5,8 @@ from __future__ import annotations
 import time
 
 from .config import PipelineConfig
-from .utils import LOGGER, select_device
+from .runtime import prepare_pipeline_for_inference
+from .utils import LOGGER
 
 
 def launch_server(config: PipelineConfig) -> None:
@@ -22,29 +23,14 @@ def launch_server(config: PipelineConfig) -> None:
         low_cpu_mem_usage=True,
     )
 
-    pipe.enable_attention_slicing(slice_size="auto")
-    pipe.enable_vae_slicing()
-
-    try:
-        pipe.enable_xformers_memory_efficient_attention()
-        LOGGER.info("xFormers attention enabled")
-    except Exception as exc:  # pragma: no cover
-        LOGGER.info("xFormers not available: %s", exc)
-
-    device = select_device()
-    if device == "cuda":
-        pipe.enable_model_cpu_offload()
-        if hasattr(torch, "compile"):
-            try:
-                pipe.unet = torch.compile(pipe.unet, mode="reduce-overhead")
-                LOGGER.info("torch.compile enabled for UNet")
-            except Exception as exc:  # pragma: no cover
-                LOGGER.warning("torch.compile failed: %s", exc)
-    elif device == "mps":
-        pipe = pipe.to("mps")
-        LOGGER.info("Apple MPS backend active")
-    else:
-        LOGGER.warning("Running on CPU - inference will be slow")
+    runtime = prepare_pipeline_for_inference(
+        pipe,
+        config,
+        compile_unet=True,
+        apply_tome=True,
+        model_dir=config.quant_dir,
+    )
+    pipe = runtime["pipe"]
 
     def generate(prompt: str, num_steps: int = 4, guidance: float = 7.5):
         if not prompt.strip():
@@ -77,6 +63,14 @@ def launch_server(config: PipelineConfig) -> None:
             (time.time() - start) / len(prompts),
         )
         return images
+
+    def _flag(key: str) -> str:
+        value = runtime.get(key)
+        if key == "tome_modules":
+            return f"enabled ({value} modules)" if value else "disabled"
+        if isinstance(value, bool):
+            return "enabled" if value else "disabled"
+        return str(value)
 
     with gr.Blocks(title="Optimised SD 1.5") as demo:
         gr.Markdown("# Optimised Stable Diffusion 1.5")
@@ -131,9 +125,15 @@ def launch_server(config: PipelineConfig) -> None:
                 | Fine-tuning recovery | enabled |
                 | FP16 quantisation | enabled |
                 | INT8 quantisation | available (`unet_int8.pt`) |
-                | Token Merging ratio | {config.tome_ratio} |
-                | torch.compile | {'enabled' if hasattr(torch, 'compile') else 'unavailable'} |
-                | Attention / VAE slicing | enabled |
+                | Device | `{runtime.get("device")}` |
+                | TF32 (Linux CUDA) | {_flag("tf32")} |
+                | xFormers | {_flag("xformers")} |
+                | SDPA fallback | {_flag("sdpa")} |
+                | CPU offload | {_flag("cpu_offload")} |
+                | Full GPU residency | {_flag("full_gpu")} |
+                | Token Merging | {_flag("tome_modules")} (ratio={config.tome_ratio}) |
+                | torch.compile | {_flag("torch_compile")} |
+                | Attention / VAE slicing | {_flag("attention_slicing")} / {_flag("vae_slicing")} |
 
                 ### Paths
                 - Quantised model: `{config.quant_dir}`

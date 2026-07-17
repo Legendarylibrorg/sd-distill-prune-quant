@@ -121,10 +121,12 @@ adapters.
 ### 8. Server
 `python -m sd_compress serve`
 
-Loads the quantised pipeline with all of the available runtime optimisations
-enabled (attention slicing, VAE slicing, xFormers when available,
-`torch.compile` when available) and launches a Gradio UI with single-image,
-batch and model-info tabs.
+Loads the quantised pipeline through the Linux-first runtime profile
+(`sd_compress.runtime.prepare_pipeline_for_inference`): TF32 + cuDNN benchmark,
+attention/VAE slicing, xFormers (SDPA fallback), VRAM-aware CPU offload vs full
+GPU residency, Token Merging, and `torch.compile`. Launches a Gradio UI with
+single-image, batch and model-info tabs that report which optimisations are
+active.
 
 ## Evaluation
 

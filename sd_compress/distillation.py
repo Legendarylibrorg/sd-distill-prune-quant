@@ -7,7 +7,8 @@ in-memory objects so individual stages can be re-run incrementally.
 from __future__ import annotations
 
 from .config import PipelineConfig
-from .utils import LOGGER, cosine_lr, free_cuda, load_captions, select_device, warmup_lr
+from .runtime import amp_context, amp_grad_scaler, maybe_channels_last, prepare_training
+from .utils import LOGGER, cosine_lr, free_cuda, load_captions, warmup_lr
 
 
 def _get_attention_maps(unet, latents, timesteps, encoder_hidden_states):
@@ -56,12 +57,13 @@ def progressive_distillation(config: PipelineConfig) -> None:
     from tqdm.auto import tqdm
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    device = select_device()
+    device = prepare_training(config)
     LOGGER.info("Progressive distillation on device=%s", device)
 
     teacher_unet = UNet2DConditionModel.from_pretrained(config.base_model, subfolder="unet").to(device)
     student_unet = UNet2DConditionModel.from_pretrained(config.base_model, subfolder="unet").to(device)
     ema_unet = UNet2DConditionModel.from_pretrained(config.base_model, subfolder="unet").to(device)
+    student_unet = maybe_channels_last(student_unet, config)
 
     tokenizer = CLIPTokenizer.from_pretrained(config.base_model, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(config.base_model, subfolder="text_encoder").to(device)
@@ -84,6 +86,7 @@ def progressive_distillation(config: PipelineConfig) -> None:
     warmup_steps = 50
 
     optimizer = torch.optim.AdamW(student_unet.parameters(), lr=config.lr)
+    scaler = amp_grad_scaler(config, device)
 
     LOGGER.info(
         "Stages=%s, steps_per_stage=%d, total_steps=%d, ema_decay=%.4f",
@@ -133,30 +136,34 @@ def progressive_distillation(config: PipelineConfig) -> None:
             noisy = scheduler.add_noise(latents, noise, timesteps)
 
             with torch.no_grad():
-                t_out, t_attn = _get_attention_maps(teacher_unet, noisy, timesteps, text_emb)
-                teacher_pred = t_out.sample
+                with amp_context(config, device):
+                    t_out, t_attn = _get_attention_maps(teacher_unet, noisy, timesteps, text_emb)
+                    teacher_pred = t_out.sample
 
-            s_out, s_attn = _get_attention_maps(student_unet, noisy, timesteps, text_emb)
-            student_pred = s_out.sample
+            with amp_context(config, device):
+                s_out, s_attn = _get_attention_maps(student_unet, noisy, timesteps, text_emb)
+                student_pred = s_out.sample
 
-            loss_output = nn.functional.mse_loss(student_pred, teacher_pred)
+                loss_output = nn.functional.mse_loss(student_pred.float(), teacher_pred.float())
 
-            loss_attn = torch.tensor(0.0, device=device)
-            if t_attn and s_attn:
-                matches = 0
-                for ta, sa in zip(t_attn[:5], s_attn[:5], strict=False):
-                    if ta.shape == sa.shape:
-                        loss_attn = loss_attn + nn.functional.mse_loss(sa, ta)
-                        matches += 1
-                if matches:
-                    loss_attn = loss_attn / matches
+                loss_attn = torch.tensor(0.0, device=device)
+                if t_attn and s_attn:
+                    matches = 0
+                    for ta, sa in zip(t_attn[:5], s_attn[:5], strict=False):
+                        if ta.shape == sa.shape:
+                            loss_attn = loss_attn + nn.functional.mse_loss(sa.float(), ta.float())
+                            matches += 1
+                    if matches:
+                        loss_attn = loss_attn / matches
 
-            loss = loss_output + 0.1 * loss_attn
+                loss = loss_output + 0.1 * loss_attn
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(student_unet.parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             _update_ema(ema_unet, student_unet, config.ema_decay)
             current_step += 1
@@ -189,7 +196,7 @@ def clip_text_distillation(config: PipelineConfig) -> None:
     from tqdm.auto import tqdm
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    device = select_device()
+    device = prepare_training(config)
     LOGGER.info("CLIP text encoder distillation on device=%s", device)
 
     tokenizer = CLIPTokenizer.from_pretrained(config.base_model, subfolder="tokenizer")
@@ -206,6 +213,7 @@ def clip_text_distillation(config: PipelineConfig) -> None:
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, max(config.clip_distill_steps, 1), eta_min=1e-7
     )
+    scaler = amp_grad_scaler(config, device)
 
     LOGGER.info("CLIP distillation steps=%d", config.clip_distill_steps)
 
@@ -220,28 +228,36 @@ def clip_text_distillation(config: PipelineConfig) -> None:
         ).input_ids.to(device)
 
         with torch.no_grad():
-            t_out = teacher(tokens, output_hidden_states=True)
-        s_out = student(tokens, output_hidden_states=True)
+            with amp_context(config, device):
+                t_out = teacher(tokens, output_hidden_states=True)
+        with amp_context(config, device):
+            s_out = student(tokens, output_hidden_states=True)
 
-        loss_hidden = nn.functional.mse_loss(s_out.last_hidden_state, t_out.last_hidden_state)
-        loss_pooled = nn.functional.mse_loss(s_out.pooler_output, t_out.pooler_output)
-
-        loss_intermediate = torch.tensor(0.0, device=device)
-        layer_count = 0
-        for i in range(0, len(t_out.hidden_states), 3):
-            loss_intermediate = loss_intermediate + nn.functional.mse_loss(
-                s_out.hidden_states[i], t_out.hidden_states[i]
+            loss_hidden = nn.functional.mse_loss(
+                s_out.last_hidden_state.float(), t_out.last_hidden_state.float()
             )
-            layer_count += 1
-        if layer_count:
-            loss_intermediate = loss_intermediate / layer_count
+            loss_pooled = nn.functional.mse_loss(
+                s_out.pooler_output.float(), t_out.pooler_output.float()
+            )
 
-        loss = loss_hidden + 0.5 * loss_pooled + 0.3 * loss_intermediate
+            loss_intermediate = torch.tensor(0.0, device=device)
+            layer_count = 0
+            for i in range(0, len(t_out.hidden_states), 3):
+                loss_intermediate = loss_intermediate + nn.functional.mse_loss(
+                    s_out.hidden_states[i].float(), t_out.hidden_states[i].float()
+                )
+                layer_count += 1
+            if layer_count:
+                loss_intermediate = loss_intermediate / layer_count
+
+            loss = loss_hidden + 0.5 * loss_pooled + 0.3 * loss_intermediate
 
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         scheduler.step()
 
         if step % 100 == 0:
@@ -261,10 +277,11 @@ def cfg_distillation(config: PipelineConfig) -> None:
     from tqdm.auto import tqdm
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    device = select_device()
+    device = prepare_training(config)
     LOGGER.info("CFG distillation on device=%s guidance=%.2f", device, config.guidance_scale)
 
     unet = UNet2DConditionModel.from_pretrained(config.distill_dir, subfolder="unet").to(device)
+    unet = maybe_channels_last(unet, config)
     teacher = UNet2DConditionModel.from_pretrained(config.distill_dir, subfolder="unet").to(device)
     tokenizer = CLIPTokenizer.from_pretrained(config.distill_dir, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(config.distill_dir, subfolder="text_encoder").to(device)
@@ -277,6 +294,7 @@ def cfg_distillation(config: PipelineConfig) -> None:
 
     captions = load_captions(config.data_path)
     optimizer = torch.optim.AdamW(unet.parameters(), lr=5e-6)
+    scaler = amp_grad_scaler(config, device)
 
     for step in tqdm(range(config.cfg_distill_steps), desc="cfg-distill"):
         caption = captions[step % len(captions)]["text"]
@@ -306,16 +324,19 @@ def cfg_distillation(config: PipelineConfig) -> None:
         noisy = scheduler.add_noise(latents, noise, timesteps)
 
         with torch.no_grad():
-            uncond = teacher(noisy, timesteps, encoder_hidden_states=uncond_emb).sample
-            cond = teacher(noisy, timesteps, encoder_hidden_states=text_emb).sample
-            cfg_output = uncond + config.guidance_scale * (cond - uncond)
+            with amp_context(config, device):
+                uncond = teacher(noisy, timesteps, encoder_hidden_states=uncond_emb).sample
+                cond = teacher(noisy, timesteps, encoder_hidden_states=text_emb).sample
+                cfg_output = uncond + config.guidance_scale * (cond - uncond)
 
-        student_out = unet(noisy, timesteps, encoder_hidden_states=text_emb).sample
-        loss = nn.functional.mse_loss(student_out, cfg_output)
+        with amp_context(config, device):
+            student_out = unet(noisy, timesteps, encoder_hidden_states=text_emb).sample
+            loss = nn.functional.mse_loss(student_out.float(), cfg_output.float())
 
         optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         if step % 100 == 0:
             LOGGER.info("  step=%d cfg-loss=%.6f", step, loss.item())

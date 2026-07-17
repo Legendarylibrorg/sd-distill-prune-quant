@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .config import PipelineConfig
+from .runtime import prepare_pipeline_for_inference
 from .utils import (
     LOGGER,
     directory_size_mb,
@@ -66,10 +67,14 @@ def evaluate_stage(
 
     dtype = torch.float16 if device == "cuda" else torch.float32
     pipe = StableDiffusionPipeline.from_pretrained(model_dir, torch_dtype=dtype)
-    if device == "cuda":
-        pipe.enable_model_cpu_offload()
-    elif device == "mps":
-        pipe = pipe.to("mps")
+    # Eval skips compile/ToMe so stage timings are comparable without warmup skew.
+    pipe = prepare_pipeline_for_inference(
+        pipe,
+        config,
+        compile_unet=False,
+        apply_tome=False,
+        model_dir=model_dir,
+    )["pipe"]
 
     has_metrics = False
     try:

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from .config import PipelineConfig, ensure_captions
+from .runtime import prepare_pipeline_for_inference
 from .utils import (
     LOGGER,
     free_cuda,
@@ -48,10 +49,10 @@ def generate_baseline(config: PipelineConfig, num_inference_steps: int = 50) -> 
 
     dtype = torch.float16 if device == "cuda" else torch.float32
     pipe = StableDiffusionPipeline.from_pretrained(config.base_model, torch_dtype=dtype)
-    if device == "cuda":
-        pipe.enable_model_cpu_offload()
-    elif device == "mps":
-        pipe = pipe.to("mps")
+    # Skip compile/ToMe here so baseline timings stay comparable across stages.
+    pipe = prepare_pipeline_for_inference(
+        pipe, config, compile_unet=False, apply_tome=False
+    )["pipe"]
 
     captions = load_captions(config.data_path)
     prompts: list[str] = [c["text"] for c in captions[: config.eval_samples]]
