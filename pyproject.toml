@@ -33,34 +33,34 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "torch>=2.12.0",
-    "torchvision>=0.27.0",
-    "diffusers>=0.38.0",
-    "transformers>=5.9.0",
-    "accelerate>=1.13.0",
-    "safetensors>=0.7.0",
-    "pillow>=12.2.0",
-    "numpy>=2.4.6",
-    "scipy>=1.17.1",
-    "tqdm>=4.67.3",
-    "gradio>=6.14.0",
+    "torch>=2.13.0",
+    "torchvision>=0.28.0",
+    "diffusers>=0.39.0",
+    "transformers>=5.14.1",
+    "accelerate>=1.14.0",
+    "safetensors>=0.8.0",
+    "pillow>=12.3.0",
+    "numpy>=2.5.1",
+    "scipy>=1.18.0",
+    "tqdm>=4.68.4",
+    "gradio>=6.20.0",
     "lpips>=0.1.4",
 ]
 
 [project.optional-dependencies]
 onnx = [
-    "optimum>=2.1.0",
-    "onnx>=1.21.0",
-    "onnxruntime>=1.26.0",
+    "optimum>=2.2.0",
+    "onnx>=1.22.0",
+    "onnxruntime>=1.27.0",
 ]
 dev = [
-    "ruff>=0.5.0",
-    "mypy>=1.8.0",
-    "build>=1.0.0",
-    "pytest>=7.4.0",
-    "pre-commit>=3.6.0",
+    "ruff>=0.15.22",
+    "mypy>=2.3.0",
+    "build>=1.5.0",
+    "pytest>=9.1.1",
+    "pre-commit>=4.6.0",
     "detect-secrets>=1.5.0",
-    "pip-audit>=2.7.0",
+    "pip-audit>=2.10.1",
 ]
 
 [project.scripts]
