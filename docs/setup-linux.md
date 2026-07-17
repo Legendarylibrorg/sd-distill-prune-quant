@@ -70,7 +70,33 @@ runtime.
 
 ```bash
 python -m sd_compress info
-# expected output contains:  'device': 'cuda'
+# expected fields include:
+#   'device': 'cuda'
+#   'linux_first': True
+#   'runtime_profile': {...}
+#   'resolved_cpu_offload': True/False   # auto based on VRAM
+```
+
+### Recommended Linux CUDA profile
+
+Defaults already favour Linux + NVIDIA. On a ≥8 GB card you typically want the
+model resident on GPU (faster than CPU offload):
+
+```bash
+export CPU_OFFLOAD=auto          # full GPU when VRAM >= LOW_VRAM_GB (8)
+export ENABLE_TF32=1
+export USE_XFORMERS=1
+export USE_TORCH_COMPILE=1
+export USE_TOME=1
+export USE_AMP=1
+```
+
+On a 6 GB card force offload:
+
+```bash
+export CPU_OFFLOAD=on
+# or lower the threshold:
+export LOW_VRAM_GB=10
 ```
 
 ## 7. Run
@@ -82,6 +108,9 @@ python -m sd_compress info
 ./run.sh distill-progressive
 ./run.sh evaluate --stage distilled --model-dir ./output/distilled
 ```
+
+`./run.sh` on Linux with a working `nvidia-smi` installs the CUDA PyTorch wheel
+first (override the index with `TORCH_CUDA_INDEX` if needed).
 
 ## 8. (Optional) Install as a package
 
@@ -95,13 +124,13 @@ sd-compress info
 ## Troubleshooting
 
 - **CUDA out of memory.** Reduce `EVAL_SAMPLES`, `STEPS` or run individual
-  stages instead of the full pipeline. Enable CPU offload by setting
-  `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512`.
+  stages instead of the full pipeline. Force offload with `CPU_OFFLOAD=on`, or
+  set `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512`.
 - **`No CUDA GPUs are available` despite a working `nvidia-smi`.** You probably
   installed a CPU-only PyTorch first; reinstall with the correct
-  `--index-url` from step 4.
+  `--index-url` from step 4 (or delete `venv/` and re-run `./run.sh`).
 - **`torch.compile` fails with a Triton error.** Triton is bundled with the
-  GPU PyTorch wheels. Either reinstall PyTorch or unset compile by exporting
-  `TORCHINDUCTOR_DISABLE=1`.
+  GPU PyTorch wheels. Either reinstall PyTorch or disable compile with
+  `USE_TORCH_COMPILE=0` (or `TORCHINDUCTOR_DISABLE=1`).
 - **Cannot connect to Hugging Face.** Set `HF_HUB_OFFLINE=1` if you have a
   local mirror, or pass `--base-model /path/to/local/checkpoint`.

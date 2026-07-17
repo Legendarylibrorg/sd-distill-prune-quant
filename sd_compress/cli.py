@@ -22,7 +22,7 @@ import sys
 
 from . import __version__
 from .config import PipelineConfig, ensure_captions
-from .utils import configure_logging, report_torch_environment
+from .utils import configure_logging
 
 
 def _config_from_args(args: argparse.Namespace) -> PipelineConfig:
@@ -128,10 +128,11 @@ def _execute(args: argparse.Namespace) -> int:
     command = args.command
 
     if command == "info":
+        from .runtime import report_runtime_environment
         from .utils import LOGGER
 
         LOGGER.info("sd_compress %s", __version__)
-        LOGGER.info("Environment: %s", report_torch_environment())
+        LOGGER.info("Environment: %s", report_runtime_environment(config))
         LOGGER.info("Configuration: %s", config.to_dict())
         return 0
 

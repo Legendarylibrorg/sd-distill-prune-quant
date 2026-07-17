@@ -77,6 +77,20 @@ class PipelineConfig:
     tome_ratio: float = field(default_factory=lambda: _env_float("TOME_RATIO", 0.5))
     shard_size_mb: int = field(default_factory=lambda: _env_int("SHARD_SIZE_MB", 500))
 
+    # Linux-first CUDA runtime (safe no-ops on macOS/Windows CPU)
+    enable_tf32: bool = field(default_factory=lambda: _env_bool("ENABLE_TF32", True))
+    cudnn_benchmark: bool = field(default_factory=lambda: _env_bool("CUDNN_BENCHMARK", True))
+    use_xformers: bool = field(default_factory=lambda: _env_bool("USE_XFORMERS", True))
+    use_torch_compile: bool = field(default_factory=lambda: _env_bool("USE_TORCH_COMPILE", True))
+    use_tome: bool = field(default_factory=lambda: _env_bool("USE_TOME", True))
+    attention_slicing: bool = field(default_factory=lambda: _env_bool("ATTENTION_SLICING", True))
+    vae_slicing: bool = field(default_factory=lambda: _env_bool("VAE_SLICING", True))
+    channels_last: bool = field(default_factory=lambda: _env_bool("CHANNELS_LAST", True))
+    use_amp: bool = field(default_factory=lambda: _env_bool("USE_AMP", True))
+    # auto = offload when VRAM < LOW_VRAM_GB; on/off force the behaviour
+    cpu_offload: str = field(default_factory=lambda: _env("CPU_OFFLOAD", "auto"))
+    low_vram_gb: float = field(default_factory=lambda: _env_float("LOW_VRAM_GB", 8.0))
+
     # Quality evaluation
     eval_samples: int = field(default_factory=lambda: _env_int("EVAL_SAMPLES", 4))
     eval_inference_steps: int = field(default_factory=lambda: _env_int("EVAL_INFERENCE_STEPS", 6))

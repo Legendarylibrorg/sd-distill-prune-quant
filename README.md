@@ -1,5 +1,10 @@
 # SD 1.5 Compression & Optimization Pipeline
 
+**Linux-first.** This project is designed and tuned primarily for **Linux + NVIDIA
+CUDA**. macOS (MPS) and Windows are supported for development and smaller runs,
+but the fastest path — TF32, xFormers, VRAM-aware GPU residency, Token Merging,
+`torch.compile`, and AMP training — targets Linux GPUs.
+
 A modular, end-to-end toolkit that takes a stock **Stable Diffusion 1.5** checkpoint
 through progressive distillation, structured pruning, fine-tuning, quantisation,
 runtime optimisation (Token Merging + `torch.compile`), ONNX export and a Gradio
@@ -13,7 +18,7 @@ baked into every step.
 
 ## Contents
 
-1. [Quick Start](#quick-start)
+1. [Quick Start (Linux)](#quick-start-linux)
 2. [Setup — Linux (recommended)](#setup--linux-recommended)
 3. [Setup — macOS](#setup--macos)
 4. [Setup — Windows](#setup--windows)
@@ -30,10 +35,39 @@ baked into every step.
 
 ---
 
-## Quick Start
+## Quick Start (Linux)
 
 ```bash
-# Linux / macOS
+# Linux + NVIDIA (recommended)
+git clone https://github.com/Legendarylibrorg/sd-distill-prune-quant.git
+cd sd-distill-prune-quant
+./run.sh
+```
+
+`./run.sh` creates a virtualenv, installs a **CUDA** PyTorch wheel when
+`nvidia-smi` is present, pulls the remaining deps (including best-effort
+xFormers), runs the full pipeline, and starts the Gradio UI on
+<http://localhost:8080>.
+
+Verify the Linux-first runtime profile:
+
+```bash
+python -m sd_compress info
+# expect: device=cuda, linux_first=True, runtime_profile={...}
+```
+
+For finer control use the CLI directly: `python -m sd_compress --help`.
+
+Hardware: an NVIDIA GPU with **≥6 GB VRAM** is strongly recommended (≥8 GB
+keeps the model resident on GPU by default). See [Setup — Linux](#setup--linux-recommended)
+for CUDA install details and the recommended env profile
+(`ENABLE_TF32`, `USE_XFORMERS`, `CPU_OFFLOAD=auto`, …).
+
+<details>
+<summary>Quick Start — macOS / Windows</summary>
+
+```bash
+# macOS (MPS / CPU — slower; use a small STEPS budget)
 git clone https://github.com/Legendarylibrorg/sd-distill-prune-quant.git
 cd sd-distill-prune-quant
 ./run.sh
@@ -46,19 +80,16 @@ cd sd-distill-prune-quant
 .\run.ps1
 ```
 
-`run.sh` / `run.ps1` create a virtualenv, install dependencies, run the full
-pipeline and start the Gradio UI on <http://localhost:8080>.
-For finer control use the CLI directly: `python -m sd_compress --help`.
+CPU or Apple Silicon works but is much slower; use a small
+`PROGRESSIVE_STAGES` / `STEPS` budget in that case.
 
-Hardware: an NVIDIA GPU with **≥6 GB VRAM** is strongly recommended. CPU or
-Apple-Silicon (MPS) execution works but is much slower; use a small
-`PROGRESSIVE_STAGES`/`STEPS` budget in that case.
+</details>
 
 ---
 
 ## Setup — Linux (recommended)
 
-Linux + NVIDIA + CUDA is the primary development target.
+Linux + NVIDIA + CUDA is the primary development and deployment target.
 
 ### 1. System prerequisites
 
@@ -382,8 +413,20 @@ so the same defaults work for `run.sh`, `run.ps1` and `python -m sd_compress`.
 | `FINETUNE_LR` | `5e-6` | Recovery learning rate |
 | **Quantisation / optimisation** | | |
 | `INT8_CALIBRATION_SAMPLES` | `100` | Samples used for INT8 calibration |
-| `TOME_RATIO` | `0.5` | Token-merging ratio applied by the helper |
+| `TOME_RATIO` | `0.5` | Token-merging ratio applied at serve time |
 | `SHARD_SIZE_MB` | `500` | Target shard size for sharded safetensors |
+| **Linux-first CUDA runtime** | | |
+| `ENABLE_TF32` | `1` | TF32 matmul / cuDNN on Ampere+ GPUs |
+| `CUDNN_BENCHMARK` | `1` | cuDNN autotune for stable shapes |
+| `USE_XFORMERS` | `1` | Prefer xFormers attention (SDPA fallback) |
+| `USE_TORCH_COMPILE` | `1` | Compile UNet in the Gradio server |
+| `USE_TOME` | `1` | Apply Token Merging in the Gradio server |
+| `CPU_OFFLOAD` | `auto` | `auto` / `on` / `off` — auto uses full GPU above `LOW_VRAM_GB` |
+| `LOW_VRAM_GB` | `8` | VRAM threshold for auto CPU offload |
+| `USE_AMP` | `1` | Mixed-precision training on CUDA |
+| `CHANNELS_LAST` | `1` | Prefer NHWC weights during CUDA training |
+| `ATTENTION_SLICING` | `1` | Diffusers attention slicing |
+| `VAE_SLICING` | `1` | Diffusers VAE slicing |
 | **Evaluation** | | |
 | `EVAL_SAMPLES` | `4` | Number of evaluation prompts |
 | `EVAL_INFERENCE_STEPS` | `6` | Step count used during evaluation |
@@ -586,6 +629,7 @@ sd-distill-prune-quant/
 │   ├── __main__.py            `python -m sd_compress`
 │   ├── cli.py                 argparse CLI
 │   ├── config.py              PipelineConfig (env-driven)
+│   ├── runtime.py             Linux-first CUDA inference / training profile
 │   ├── utils.py               Shared helpers (device, logging, JSON, ...)
 │   ├── baseline.py            Stage 0
 │   ├── distillation.py        Progressive / CLIP / CFG distillation

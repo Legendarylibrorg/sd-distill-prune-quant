@@ -74,13 +74,13 @@ _TOME_TEMPLATE = textwrap.dedent(
 
 _COMPILE_TEMPLATE = textwrap.dedent(
     '''
-    """``torch.compile`` wrapper for the quantised pipeline."""
+    """``torch.compile`` wrapper for the quantised pipeline (Linux CUDA first)."""
 
     import torch
     from diffusers import StableDiffusionPipeline
 
 
-    def load_compiled_pipeline(model_path, compile_mode="reduce-overhead"):
+    def load_compiled_pipeline(model_path, compile_mode="reduce-overhead", full_gpu=True):
         pipe = StableDiffusionPipeline.from_pretrained(
             model_path,
             torch_dtype=torch.float16,
@@ -88,7 +88,23 @@ _COMPILE_TEMPLATE = textwrap.dedent(
         )
 
         if torch.cuda.is_available():
-            pipe = pipe.to("cuda")
+            # Prefer TF32 + cuDNN autotune on Linux NVIDIA GPUs.
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+            if hasattr(torch, "set_float32_matmul_precision"):
+                torch.set_float32_matmul_precision("high")
+
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+            except Exception:
+                pass
+
+            if full_gpu:
+                pipe = pipe.to("cuda")
+            else:
+                pipe.enable_model_cpu_offload()
+
             if hasattr(torch, "compile"):
                 pipe.unet = torch.compile(pipe.unet, mode=compile_mode)
                 pipe.vae.decode = torch.compile(pipe.vae.decode, mode=compile_mode)

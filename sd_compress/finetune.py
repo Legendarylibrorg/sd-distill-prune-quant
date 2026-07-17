@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 
 from .config import PipelineConfig
-from .utils import LOGGER, free_cuda, load_captions, select_device
+from .runtime import amp_context, amp_grad_scaler, maybe_channels_last, prepare_training
+from .utils import LOGGER, free_cuda, load_captions
 
 
 def finetune_after_pruning(config: PipelineConfig) -> None:
@@ -20,7 +21,7 @@ def finetune_after_pruning(config: PipelineConfig) -> None:
     from tqdm.auto import tqdm
     from transformers import CLIPTextModel, CLIPTokenizer
 
-    device = select_device()
+    device = prepare_training(config)
     LOGGER.info(
         "Fine-tuning pruned UNet for %d steps lr=%.2e (device=%s)",
         config.finetune_steps,
@@ -29,6 +30,7 @@ def finetune_after_pruning(config: PipelineConfig) -> None:
     )
 
     unet = UNet2DConditionModel.from_pretrained(config.prune_dir, subfolder="unet").to(device)
+    unet = maybe_channels_last(unet, config)
     tokenizer = CLIPTokenizer.from_pretrained(config.prune_dir, subfolder="tokenizer")
     text_encoder = CLIPTextModel.from_pretrained(config.prune_dir, subfolder="text_encoder").to(device)
     scheduler = DDPMScheduler.from_pretrained(config.prune_dir, subfolder="scheduler")
@@ -43,6 +45,7 @@ def finetune_after_pruning(config: PipelineConfig) -> None:
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, max(config.finetune_steps, 1), eta_min=1e-7
     )
+    scaler = amp_grad_scaler(config, device)
 
     for step in tqdm(range(config.finetune_steps), desc="finetune"):
         caption = captions[step % len(captions)]["text"]
@@ -62,13 +65,16 @@ def finetune_after_pruning(config: PipelineConfig) -> None:
         noise = torch.randn_like(latents)
         noisy = scheduler.add_noise(latents, noise, timesteps)
 
-        pred = unet(noisy, timesteps, encoder_hidden_states=text_emb).sample
-        loss = nn.functional.mse_loss(pred, noise)
+        with amp_context(config, device):
+            pred = unet(noisy, timesteps, encoder_hidden_states=text_emb).sample
+            loss = nn.functional.mse_loss(pred.float(), noise.float())
 
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(unet.parameters(), 1.0)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
         lr_scheduler.step()
 
         if step % 50 == 0:
