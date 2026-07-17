@@ -22,8 +22,8 @@ gradio>=6.20.0
 
 # Quality evaluation
 lpips>=0.1.4
-# CLIP is installed from GitHub by run.sh / run.ps1:
-#   pip install git+https://github.com/openai/CLIP.git
+# CLIP is installed from a pinned GitHub commit by run.sh / run.ps1:
+#   pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"
 
 # Optional ONNX export
 optimum>=2.2.0

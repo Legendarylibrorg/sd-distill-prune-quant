@@ -93,7 +93,9 @@ Two artefacts are produced:
 
 - `output/quant/` — a complete diffusers pipeline saved in **FP16**.
 - `output/quant/unet_int8.pt` — a dynamic INT8 quantised UNet state-dict (best
-  suited for CPU x86 deployment).
+  suited for CPU x86 deployment). Stored as ``.pt`` because torch dynamic
+  quantisation uses tensor types safetensors cannot represent; load only via
+  ``sd_compress.quantization.load_int8_state_dict`` (``weights_only=True``).
 
 ### 5. Runtime optimisations
 `python -m sd_compress optimize`
@@ -127,6 +129,17 @@ attention/VAE slicing, xFormers (SDPA fallback), VRAM-aware CPU offload vs full
 GPU residency, Token Merging, and `torch.compile`. Launches a Gradio UI with
 single-image, batch and model-info tabs that report which optimisations are
 active.
+
+Security notes:
+
+- The server binds to `127.0.0.1` (loopback) by default and has **no built-in
+  authentication**. To reach it from another machine, set `SERVER_HOST=0.0.0.0`
+  and place it behind a reverse proxy / auth layer you control.
+- Requests are bounded server-side by `MAX_BATCH_PROMPTS`, `MAX_INFERENCE_STEPS`
+  and `MAX_PROMPT_CHARS` to limit resource-exhaustion abuse.
+- Token Merging always uses the in-package implementation; helper Python found
+  in a model directory (e.g. a shipped `tome_utils.py`) is **never** imported or
+  executed, so a shared/untrusted `quant/` folder cannot run code.
 
 ## Evaluation
 

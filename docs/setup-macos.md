@@ -36,7 +36,7 @@ needed.
 
 ```bash
 pip install -r requirements.txt
-pip install "git+https://github.com/openai/CLIP.git"   # optional
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"   # optional
 ```
 
 Do **not** install `xformers` — it does not ship for macOS.

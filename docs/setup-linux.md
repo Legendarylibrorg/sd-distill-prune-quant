@@ -59,7 +59,7 @@ Reference: <https://pytorch.org/get-started/locally/>.
 
 ```bash
 pip install -r requirements.txt
-pip install "git+https://github.com/openai/CLIP.git"   # optional
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"   # optional
 pip install xformers                                   # optional, often speeds attention
 ```
 
@@ -89,6 +89,7 @@ export USE_XFORMERS=1
 export USE_TORCH_COMPILE=1
 export USE_TOME=1
 export USE_AMP=1
+export AMP_DTYPE=auto            # bf16 on Ampere+; fp16 fallback on older GPUs
 ```
 
 On a 6 GB card force offload:

@@ -32,28 +32,39 @@ def launch_server(config: PipelineConfig) -> None:
     )
     pipe = runtime["pipe"]
 
+    def _clamp_steps(num_steps: int) -> int:
+        return max(1, min(int(num_steps), config.max_inference_steps))
+
     def generate(prompt: str, num_steps: int = 4, guidance: float = 7.5):
-        if not prompt.strip():
+        prompt = prompt.strip()[: config.max_prompt_chars]
+        if not prompt:
             return None
         start = time.time()
         with torch.inference_mode():
             image = pipe(
                 prompt,
-                num_inference_steps=int(num_steps),
+                num_inference_steps=_clamp_steps(num_steps),
                 guidance_scale=guidance,
             ).images[0]
-        LOGGER.info("generate(prompt=%r) -> %.2fs", prompt, time.time() - start)
+        LOGGER.info("generate(len=%d) -> %.2fs", len(prompt), time.time() - start)
         return image
 
     def generate_batch(text: str, num_steps: int = 4, guidance: float = 7.5):
-        prompts = [p.strip() for p in text.strip().splitlines() if p.strip()]
+        prompts = [p.strip()[: config.max_prompt_chars] for p in text.strip().splitlines() if p.strip()]
         if not prompts:
             return []
+        if len(prompts) > config.max_batch_prompts:
+            LOGGER.warning(
+                "Batch of %d prompts exceeds MAX_BATCH_PROMPTS=%d; truncating",
+                len(prompts),
+                config.max_batch_prompts,
+            )
+            prompts = prompts[: config.max_batch_prompts]
         start = time.time()
         with torch.inference_mode():
             images = pipe(
                 prompts,
-                num_inference_steps=int(num_steps),
+                num_inference_steps=_clamp_steps(num_steps),
                 guidance_scale=guidance,
             ).images
         LOGGER.info(
@@ -141,6 +152,14 @@ def launch_server(config: PipelineConfig) -> None:
                 - Sharded weights: `{config.export_dir}/sharded`
                 """
             )
+
+    if config.server_host not in {"127.0.0.1", "localhost", "::1"}:
+        LOGGER.warning(
+            "Gradio is binding to %s (not loopback). The server has no built-in "
+            "authentication — expose it only behind a trusted network or reverse "
+            "proxy. Set SERVER_HOST=127.0.0.1 for local-only use.",
+            config.server_host,
+        )
 
     LOGGER.info("Starting Gradio server on http://%s:%d", config.server_host, config.server_port)
     demo.launch(server_name=config.server_host, server_port=config.server_port)

@@ -153,7 +153,7 @@ matches your driver.
 pip install -r requirements.txt
 
 # CLIP score (optional but recommended)
-pip install "git+https://github.com/openai/CLIP.git"
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"
 
 # xFormers memory-efficient attention (optional, big speedup when it works)
 pip install xformers
@@ -239,7 +239,7 @@ Standard PyPI wheels work on macOS:
 
 ```bash
 pip install -r requirements.txt
-pip install "git+https://github.com/openai/CLIP.git"   # optional
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"   # optional
 ```
 
 Skip `xformers` — it does not ship for macOS.
@@ -328,7 +328,7 @@ pip install --index-url https://download.pytorch.org/whl/cu121 `
 
 ```powershell
 pip install -r requirements.txt
-pip install "git+https://github.com/openai/CLIP.git"
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"
 
 # Optional, often unavailable on Windows
 # pip install xformers
@@ -424,6 +424,7 @@ so the same defaults work for `run.sh`, `run.ps1` and `python -m sd_compress`.
 | `CPU_OFFLOAD` | `auto` | `auto` / `on` / `off` — auto uses full GPU above `LOW_VRAM_GB` |
 | `LOW_VRAM_GB` | `8` | VRAM threshold for auto CPU offload |
 | `USE_AMP` | `1` | Mixed-precision training on CUDA |
+| `AMP_DTYPE` | `auto` | Train autocast dtype: `auto` → **bf16** on Ampere+, else fp16; or force `bf16` / `fp16` |
 | `CHANNELS_LAST` | `1` | Prefer NHWC weights during CUDA training |
 | `ATTENTION_SLICING` | `1` | Diffusers attention slicing |
 | `VAE_SLICING` | `1` | Diffusers VAE slicing |
@@ -434,8 +435,11 @@ so the same defaults work for `run.sh`, `run.ps1` and `python -m sd_compress`.
 | `MAX_LPIPS_INCREASE` | `0.15` | Maximum acceptable LPIPS increase |
 | `MIN_SSIM_RETENTION` | `0.85` | Minimum acceptable SSIM retention |
 | **Server** | | |
-| `SERVER_HOST` | `0.0.0.0` | Gradio host |
+| `SERVER_HOST` | `127.0.0.1` | Gradio host. Loopback by default; set `0.0.0.0` (behind auth / a reverse proxy) to expose off-host |
 | `SERVER_PORT` | `8080` | Gradio port |
+| `MAX_BATCH_PROMPTS` | `8` | Max prompts processed per batch request |
+| `MAX_INFERENCE_STEPS` | `50` | Upper bound on steps accepted by the server |
+| `MAX_PROMPT_CHARS` | `1000` | Prompts are truncated to this length |
 
 Override any of them per-stage, e.g.:
 
@@ -572,15 +576,20 @@ for name, module in pipe.unet.named_modules():
 
 ### INT8 (CPU)
 
+Dynamic INT8 state-dicts use torch quantized tensors, so they are stored as
+``.pt`` (not safetensors). Always load them with ``weights_only=True`` — use the
+helper below rather than a bare ``torch.load`` on untrusted files.
+
 ```python
 import torch
 from diffusers import UNet2DConditionModel
+from sd_compress.quantization import load_int8_state_dict
 
 unet = UNet2DConditionModel.from_pretrained("./output/quant", subfolder="unet")
 unet = torch.quantization.quantize_dynamic(
     unet, {torch.nn.Linear, torch.nn.Conv2d}, dtype=torch.qint8
 )
-unet.load_state_dict(torch.load("./output/quant/unet_int8.pt"))
+unet.load_state_dict(load_int8_state_dict("./output/quant/unet_int8.pt"))
 ```
 
 ### TensorRT (NVIDIA)
