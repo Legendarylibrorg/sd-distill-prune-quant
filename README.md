@@ -6,8 +6,8 @@ but the fastest path — TF32, xFormers, VRAM-aware GPU residency, Token Merging
 `torch.compile`, and AMP training — targets Linux GPUs.
 
 A modular, end-to-end toolkit that takes a stock **Stable Diffusion 1.5** checkpoint
-through progressive distillation, structured pruning, fine-tuning, quantisation,
-runtime optimisation (Token Merging + `torch.compile`), ONNX export and a Gradio
+through progressive distillation, structured pruning, fine-tuning, quantization,
+runtime optimization (Token Merging + `torch.compile`), ONNX export and a Gradio
 inference server — with **per-stage quality evaluation** (CLIP / LPIPS / PSNR / SSIM)
 baked into every step.
 
