@@ -120,31 +120,20 @@ def _enable_sdpa(pipe: Any) -> bool:
 
 
 def _apply_tome(pipe: Any, ratio: float) -> int:
-    """Apply Token Merging wrappers to UNet attention modules. Returns count."""
+    """Apply Token Merging wrappers to UNet attention modules. Returns count.
+
+    Token Merging is always applied via the trusted in-package implementation
+    (:func:`_inline_apply_tome`). We deliberately never import or execute a
+    ``tome_utils.py`` found in the model directory: model artefacts are data,
+    not code, and executing helper Python shipped next to weights would turn a
+    writable/shared ``quant_dir`` into a code-execution vector.
+    """
     applied = 0
     try:
-        # Prefer the helper shipped next to a quantised model when present.
-        from pathlib import Path
-
-        tome_path = Path(getattr(pipe, "_sd_compress_model_dir", "") or "") / "tome_utils.py"
-        apply_fn = None
-        if tome_path.is_file():
-            import importlib.util
-
-            spec = importlib.util.spec_from_file_location("tome_utils", tome_path)
-            if spec and spec.loader:
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                apply_fn = getattr(module, "apply_tome_to_attention", None)
-
-        if apply_fn is None:
-            # Inline minimal ToMe wrap mirroring optimization._TOME_TEMPLATE.
-            apply_fn = _inline_apply_tome
-
         for name, module in pipe.unet.named_modules():
             leaf = name.rsplit(".", 1)[-1]
             if leaf in {"attn1", "attn2"} and hasattr(module, "forward"):
-                apply_fn(module, ratio=ratio)
+                _inline_apply_tome(module, ratio=ratio)
                 applied += 1
     except Exception as exc:  # pragma: no cover
         LOGGER.warning("ToMe application failed: %s", exc)
@@ -209,11 +198,15 @@ def prepare_pipeline_for_inference(
     compile_unet / apply_tome:
         Override config defaults. Evaluation typically disables both to avoid
         compile warmup skewing timings; the Gradio server enables them.
+    model_dir:
+        Informational only (kept for API compatibility / logging). Token
+        Merging always uses the trusted in-package implementation; helper
+        Python in the model directory is never imported or executed.
     """
     import torch
 
     if model_dir:
-        pipe._sd_compress_model_dir = model_dir
+        LOGGER.debug("Preparing pipeline for model directory %s", model_dir)
 
     status: dict[str, Any] = {
         "device": select_device(),
@@ -296,7 +289,12 @@ def prepare_training(config: PipelineConfig) -> str:
     configure_cuda_backends(config)
     device = select_device()
     if device == "cuda" and config.use_amp:
-        LOGGER.info("CUDA training: AMP enabled (USE_AMP=1)")
+        dtype = resolve_amp_dtype(config)
+        LOGGER.info(
+            "CUDA training: AMP enabled dtype=%s (AMP_DTYPE=%s)",
+            dtype,
+            config.amp_dtype,
+        )
     if device == "cuda" and config.channels_last:
         LOGGER.info("CUDA training: channels_last preferred when modules support it")
     return device
@@ -317,6 +315,31 @@ def maybe_channels_last(module: Any, config: PipelineConfig) -> Any:
         return module
 
 
+def resolve_amp_dtype(config: PipelineConfig) -> str:
+    """Return ``bf16`` or ``fp16`` for CUDA AMP.
+
+    Linux-first default (``AMP_DTYPE=auto``): prefer bfloat16 when the GPU
+    reports BF16 support (Ampere / Ada / Hopper). BF16 keeps FP32's exponent
+    range so distillation and fine-tune need no GradScaler; fall back to
+    float16 on older GPUs.
+    """
+    choice = (config.amp_dtype or "auto").strip().lower()
+    if choice in {"bf16", "bfloat16", "b"}:
+        return "bf16"
+    if choice in {"fp16", "float16", "half", "f"}:
+        return "fp16"
+    # auto
+    try:
+        import torch
+
+        if torch.cuda.is_available() and hasattr(torch.cuda, "is_bf16_supported"):
+            if torch.cuda.is_bf16_supported():
+                return "bf16"
+    except Exception:  # pragma: no cover
+        pass
+    return "fp16"
+
+
 def amp_context(config: PipelineConfig, device: str):
     """Return a ``torch.autocast`` context for CUDA AMP, or a nullcontext."""
     from contextlib import nullcontext
@@ -325,17 +348,23 @@ def amp_context(config: PipelineConfig, device: str):
         return nullcontext()
     import torch
 
-    return torch.autocast(device_type="cuda", dtype=torch.float16)
+    dtype = torch.bfloat16 if resolve_amp_dtype(config) == "bf16" else torch.float16
+    return torch.autocast(device_type="cuda", dtype=dtype)
 
 
 def amp_grad_scaler(config: PipelineConfig, device: str):
-    """Return a CUDA GradScaler when AMP is enabled, else a disabled scaler."""
+    """Return a CUDA GradScaler for FP16 AMP; disabled for BF16 / non-CUDA.
+
+    BF16 training does not need loss scaling (same exponent range as FP32).
+    """
     import torch
 
-    enabled = bool(config.use_amp and device == "cuda")
+    use_scaler = bool(
+        config.use_amp and device == "cuda" and resolve_amp_dtype(config) == "fp16"
+    )
     if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
-        return torch.amp.GradScaler("cuda", enabled=enabled)
-    return torch.cuda.amp.GradScaler(enabled=enabled)
+        return torch.amp.GradScaler("cuda", enabled=use_scaler)
+    return torch.cuda.amp.GradScaler(enabled=use_scaler)
 
 
 def report_runtime_environment(config: PipelineConfig | None = None) -> dict[str, Any]:
@@ -360,6 +389,8 @@ def report_runtime_environment(config: PipelineConfig | None = None) -> dict[str
                 info["cuda_vram_gb"] = round(vram, 2)
             info["tf32_matmul"] = bool(torch.backends.cuda.matmul.allow_tf32)
             info["cudnn_benchmark"] = bool(torch.backends.cudnn.benchmark)
+            if hasattr(torch.cuda, "is_bf16_supported"):
+                info["bf16_supported"] = bool(torch.cuda.is_bf16_supported())
     except ImportError:  # pragma: no cover
         pass
 
@@ -380,6 +411,10 @@ def report_runtime_environment(config: PipelineConfig | None = None) -> dict[str
             "cpu_offload": config.cpu_offload,
             "low_vram_gb": config.low_vram_gb,
             "use_amp": config.use_amp,
+            "amp_dtype": config.amp_dtype,
+            "resolved_amp_dtype": (
+                resolve_amp_dtype(config) if info.get("device") == "cuda" and config.use_amp else None
+            ),
             "channels_last": config.channels_last,
         }
         if info.get("device") == "cuda":
@@ -398,5 +433,6 @@ __all__ = [
     "prepare_pipeline_for_inference",
     "prepare_training",
     "report_runtime_environment",
+    "resolve_amp_dtype",
     "resolve_cpu_offload",
 ]

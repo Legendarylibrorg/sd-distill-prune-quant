@@ -25,12 +25,14 @@ pip install --prefer-binary lpips
 
 ### `CLIP install failed` warning during `run.sh`
 The CLIP repo on GitHub may be unreachable; CLIP scoring is disabled but every
-other stage still works. Retry later with:
+other stage still works. Retry with the **pinned** commit (do not track floating
+``main``):
 
 ```bash
-pip install "git+https://github.com/openai/CLIP.git"
+pip install "git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6"
 ```
 
+Override the pin via ``CLIP_GIT_REF=<sha>`` when using ``./run.sh`` / ``run.ps1``.
 ## Runtime
 
 ### `CUDA out of memory` during distillation
@@ -96,3 +98,13 @@ confirm.
 Dynamic INT8 changes Linear / Conv2d numerics. If the divergence is severe,
 keep the FP16 pipeline at `output/quant/` and ignore `unet_int8.pt`. INT8 is
 intended for CPU x86 deployment where its memory advantage matters most.
+
+### Loading `unet_int8.pt` safely
+Dynamic INT8 uses torch quantized tensors, so the sidecar is ``.pt`` (not
+safetensors). Always load with ``weights_only=True`` via the package helper —
+never bare ``torch.load`` on an untrusted file:
+
+```python
+from sd_compress.quantization import load_int8_state_dict
+state = load_int8_state_dict("./output/quant/unet_int8.pt")
+```

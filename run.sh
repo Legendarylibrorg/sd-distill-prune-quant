@@ -50,8 +50,9 @@ if [ ! -f "$VENV_DIR/.deps_installed" ]; then
 
     pip install -r requirements.txt
 
-    # CLIP for evaluation metrics is hosted on GitHub
-    pip install --quiet "git+https://github.com/openai/CLIP.git" \
+    # CLIP for evaluation metrics — pin to a commit so `main` cannot silently change.
+    CLIP_GIT_REF="${CLIP_GIT_REF:-d05afc436d78f1c48dc0dbf8e5980a9d471f35f6}"
+    pip install --quiet "git+https://github.com/openai/CLIP.git@${CLIP_GIT_REF}" \
         || echo "[run.sh] WARNING: CLIP install failed; CLIP score will be skipped"
 
     # xFormers is best-effort; failures are non-fatal (biggest win on Linux CUDA)

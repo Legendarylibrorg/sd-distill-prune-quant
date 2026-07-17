@@ -40,7 +40,9 @@ if (-not (Test-Path $DepsMarker)) {
     Write-Host "[run.ps1] Installing Python requirements (this may take a while)"
     pip install -r requirements.txt
     try {
-        pip install --quiet "git+https://github.com/openai/CLIP.git"
+        # Pin CLIP to a commit so upstream `main` cannot silently change.
+        $ClipGitRef = if ($env:CLIP_GIT_REF) { $env:CLIP_GIT_REF } else { "d05afc436d78f1c48dc0dbf8e5980a9d471f35f6" }
+        pip install --quiet "git+https://github.com/openai/CLIP.git@$ClipGitRef"
     } catch {
         Write-Warning "[run.ps1] CLIP install failed; CLIP score will be skipped"
     }

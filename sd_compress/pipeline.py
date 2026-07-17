@@ -12,8 +12,8 @@ from .lora import test_lora_compatibility
 from .optimization import install_runtime_helpers
 from .pruning import prune_all
 from .quantization import quantize
-from .utils import LOGGER
 from .runtime import report_runtime_environment
+from .utils import LOGGER
 
 
 def run_full_pipeline(config: PipelineConfig, launch_server_after: bool = False) -> None:

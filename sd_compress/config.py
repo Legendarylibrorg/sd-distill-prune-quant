@@ -87,6 +87,8 @@ class PipelineConfig:
     vae_slicing: bool = field(default_factory=lambda: _env_bool("VAE_SLICING", True))
     channels_last: bool = field(default_factory=lambda: _env_bool("CHANNELS_LAST", True))
     use_amp: bool = field(default_factory=lambda: _env_bool("USE_AMP", True))
+    # auto = bf16 when CUDA reports bf16 support (Ampere+), else fp16
+    amp_dtype: str = field(default_factory=lambda: _env("AMP_DTYPE", "auto"))
     # auto = offload when VRAM < LOW_VRAM_GB; on/off force the behaviour
     cpu_offload: str = field(default_factory=lambda: _env("CPU_OFFLOAD", "auto"))
     low_vram_gb: float = field(default_factory=lambda: _env_float("LOW_VRAM_GB", 8.0))
@@ -99,8 +101,14 @@ class PipelineConfig:
     min_ssim_retention: float = field(default_factory=lambda: _env_float("MIN_SSIM_RETENTION", 0.85))
 
     # Server
-    server_host: str = field(default_factory=lambda: _env("SERVER_HOST", "0.0.0.0"))
+    # Bind to loopback by default so `serve` is not reachable off-host. Set
+    # SERVER_HOST=0.0.0.0 explicitly (behind auth / a reverse proxy) to expose it.
+    server_host: str = field(default_factory=lambda: _env("SERVER_HOST", "127.0.0.1"))
     server_port: int = field(default_factory=lambda: _env_int("SERVER_PORT", 8080))
+    # Server-side guard rails for the Gradio UI.
+    max_batch_prompts: int = field(default_factory=lambda: _env_int("MAX_BATCH_PROMPTS", 8))
+    max_inference_steps: int = field(default_factory=lambda: _env_int("MAX_INFERENCE_STEPS", 50))
+    max_prompt_chars: int = field(default_factory=lambda: _env_int("MAX_PROMPT_CHARS", 1000))
 
     @property
     def progressive_stage_list(self) -> list[int]:

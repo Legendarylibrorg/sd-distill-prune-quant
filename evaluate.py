@@ -65,7 +65,7 @@ def get_clip_model(device="cuda"):
             _clip_model, _clip_preprocess = clip.load("ViT-B/32", device=device)
             _clip_model.eval()
         except ImportError:
-            print("CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git")
+            print("CLIP not installed. Install with: pip install git+https://github.com/openai/CLIP.git@d05afc436d78f1c48dc0dbf8e5980a9d471f35f6")
             return None, None
     return _clip_model, _clip_preprocess
 
