@@ -1,4 +1,4 @@
-# SD 1.5 Compression & Optimisation Pipeline
+# SD 1.5 Compression & Optimization Pipeline
 
 A modular, end-to-end toolkit that takes a stock **Stable Diffusion 1.5** checkpoint
 through progressive distillation, structured pruning, fine-tuning, quantisation,
